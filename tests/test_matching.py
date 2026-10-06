@@ -76,19 +76,36 @@ def test_clusters_sorted_by_strength():
     assert strengths[0] == 3        # قبل از هش‌گذاری، بالاترین ★★★ (حجم+زمان)
 
 
-def test_hash_upgrades_group_to_exact():
+def test_full_hash_marks_group_exact():
+    """هشِ **کامل** (`scope="full"`) ⇒ قطعی (★★★★)."""
     rows = load_rows()
     first = M.find_clusters(rows, CFG)
     assert cluster_of(first, 101, rows)["exact"] is False
-    # هشِ یکسان برای ۱۰۱ و ۱۰۲ (شبیه‌سازیِ خروجیِ واقعیِ هش‌گذاری)
+    for r in rows:
+        if r["msg_id"] in (101, 102):
+            r["content_hash"] = "9f2c1d" + "0" * 26
+            r["hash_scope"] = "full"
+    second = M.find_clusters(rows, CFG)
+    c = cluster_of(second, 101, rows)
+    assert c["exact"] is True and c["strength"] == 4
+    assert "هشِ کامل" in c["reason"]
+    # نامزدِ هش‌گذاری باید شاملِ همین دو باشد
+    ids = M.hash_candidate_ids(rows, CFG)
+    byid = {r["id"]: r["msg_id"] for r in rows}
+    assert 101 in {byid[i] for i in ids} and 102 in {byid[i] for i in ids}
+
+
+def test_sampled_hash_is_not_labelled_exact():
+    """هشِ سه‌تکه (نمونه) قوی است ولی «قطعاً همان فایل» نیست ⇒ ★★★ نه ★★★★."""
+    rows = load_rows()
     for r in rows:
         if r["msg_id"] in (101, 102):
             r["content_hash"] = "9f2c1d" + "0" * 26
             r["hash_scope"] = "0+131072,100352+131072"
-    second = M.find_clusters(rows, CFG)
-    c = cluster_of(second, 101, rows)
-    assert c["exact"] is True and c["strength"] == 4
-    assert "هش" in c["reason"]
+    c = cluster_of(M.find_clusters(rows, CFG), 101, rows)
+    assert c["exact"] is False
+    assert c["strength"] == 3
+    assert "نمونهٔ محتوا" in c["reason"] and "قطعی" not in c["reason"]
     # نامزدِ هش‌گذاری باید شاملِ همین دو باشد
     ids = M.hash_candidate_ids(rows, CFG)
     byid = {r["id"]: r["msg_id"] for r in rows}
@@ -163,10 +180,13 @@ def test_album_siblings_are_not_flagged_when_different():
 
 def test_verify_pair_reports_each_signal():
     a = {"file_name": "x.1080p.mkv", "name_norm": "x", "caption": "", "caption_norm": "", "size": 50 * 1024 * 1024,
-         "duration": 60, "content_hash": "h1", "hash_scope": "s"}
+         "duration": 60, "content_hash": "h1", "hash_scope": "0+131072,100352+131072"}
     b = dict(a, id=2)
     sig = M.verify_pair(a, b, CFG)
-    assert set(sig) == {"hash", "name", "size_time"}
+    assert set(sig) == {"hash_partial", "name", "size_time"}
+
+    full = dict(a, hash_scope="full")
+    assert set(M.verify_pair(full, dict(full, id=2), CFG)) == {"hash", "name", "size_time"}
 
 
 def test_candidate_pairs_bounded_on_big_channel():
@@ -230,3 +250,62 @@ def test_legacy_rows_without_norm_fields_are_recovered():
     assert all(not r.get("name_norm") for r in legacy)
     clusters = M.find_clusters(SC._with_norms(legacy), CFG)
     assert len(clusters) == 1 and clusters[0]["count"] == 2
+
+
+def test_size_and_time_exactness_comes_from_data_not_score():
+    """فرمولِ `sd * 100` امتیازِ حجم را ۱ می‌کرد و «حجم و زمان یکسان» گزارش می‌شد.
+
+    حالا: زمانِ برابر + حجمِ فقط نزدیک ⇒ «زمان یکسان + حجمِ نزدیک» و پرچمِ دقیق = False.
+    """
+    big = 100 * 1024 * 1024
+    ok_a, sc_a = S.size_time_same({"size": big, "duration": 60},
+                                  {"size": int(big * 0.998), "duration": 60},
+                                  size_tol_pct=0.5, dur_tol_s=2.0, min_size=102400, min_duration_s=3,
+                                  require_one_exact=True)
+    assert ok_a is True and sc_a < 1.0                      # نزدیک ≠ یکسان
+    ok_b, sc_b = S.size_time_same({"size": big, "duration": 60}, {"size": big, "duration": 60},
+                                  size_tol_pct=0.5, dur_tol_s=2.0, min_size=102400, min_duration_s=3,
+                                  require_one_exact=True)
+    assert ok_b is True and sc_b == 1.0
+
+    def cluster(size_a, size_b):
+        rows = [{**row, "size": sz, "duration": 60, "name_norm": "", "caption_norm": ""}
+                for row, sz in (({"id": 1, "message_id": 1, "channel_id": 1}, size_a),
+                                ({"id": 2, "message_id": 2, "channel_id": 1}, size_b))]
+        cs = M.find_clusters(rows, CFG)
+        assert len(cs) == 1
+        return cs[0]
+
+    near = cluster(big, int(big * 0.998))
+    assert near["size_time_exact"] is False
+    assert near["reason"] == "زمان یکسان + حجمِ نزدیک"
+
+    same = cluster(big, big)
+    assert same["size_time_exact"] is True
+    assert same["reason"] == "حجم و زمان یکسان"
+
+
+def test_size_window_cap_does_not_lose_real_duplicate():
+    """با صدها فایلِ هم‌اندازه، جفتِ واقعی (۱۰۱ و آخرین فایل) باید پیدا شود."""
+    rows = []
+    # ۳۰۰ فایل با نام‌های متفاوت و حجم‌های پله‌ای (۵۰۰KB پله) ⇒ همه در پنجرهٔ ۰.۵٪ جا می‌گیرند
+    for i in range(300):
+        rows.append({"id": i, "message_id": i, "channel_id": 1, "file_name": "clip-%03d.mkv" % i,
+                     "name_norm": "clip-%03d" % i, "caption_norm": "", "caption": "",
+                     "size": 900_000_000 + i * 500_000, "duration": 5400 + (i % 7),
+                     "content_hash": ""})
+    # تکراریِ واقعی: فایلِ اول و آخر (حجمِ نزدیک + زمانِ دقیقاً یکسان)
+    rows[-1]["duration"] = rows[0]["duration"]
+    stats = {}
+    cs = M.find_clusters(rows, dict(CFG, size_pair_cap=8), stats=stats)
+    ids = [c["ids"] for c in cs]
+    assert any(0 in x and 299 in x for x in ids), "جفتِ واقعی به‌خاطرِ سقف از دست رفت"
+    assert stats.get("size_pairs_dropped", 0) > 0            # سقف واقعاً فعال بوده
+
+
+def test_candidate_stats_report_dropped_pairs():
+    rows = [{"id": i, "message_id": i, "channel_id": 1, "name_norm": "", "caption_norm": "",
+             "size": 900_000_000 + i * 4096, "duration": 5400 + (i % 3), "content_hash": ""} for i in range(120)]
+    stats = {}
+    M.candidate_pairs(rows, dict(CFG, size_pair_cap=4), stats=stats)
+    assert stats.get("size_pairs_dropped", 0) > 0
