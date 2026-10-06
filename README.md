@@ -54,7 +54,7 @@ MTProto)** — that is what makes "see every video in the channel" actually work
 
 ```bash
 pip install -r requirements.txt
-python3 -m pytest tests/ -q     # 130 tests
+python3 -m pytest tests/ -q     # 139 tests
 python3 dev/mock_e2e.py         # offline end-to-end demo: prints the real bot messages & buttons
 ```
 
@@ -73,7 +73,7 @@ app/report.py         message texts, progress bar, keyboards, Tehran dates
 app/bot_app.py        bot logic: menus, wizards, callbacks
 dev/fake_telegram.py  offline Telegram simulator
 dev/mock_e2e.py       offline demo of the full user journey
-tests/                130 tests (unit + end-to-end bot flow + real client path)
+tests/                139 tests (unit + end-to-end bot flow + real client path)
 ```
 
 ## Safety
@@ -82,5 +82,7 @@ tests/                130 tests (unit + end-to-end bot flow + real client path)
   code/password messages in your private chat.
 * Tokens/session strings are never printed in chat and stripped from public settings views.
 * Only metadata (name, size, duration, caption, message id, short hash) is stored — videos are never downloaded in full.
+* If `OWNER_ID` is empty the bot does **not** hand ownership to the first messenger: a one-time
+  claim code is printed in the server log and you must send `/claim <code>` (or set `OWNER_CLAIM_CODE`).
 
 **Version 1.0.0**
