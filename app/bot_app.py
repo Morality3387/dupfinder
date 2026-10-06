@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from . import preview as P
 from . import report as R
 from .config import LABELS, Settings
 from .scanner import Progress, ScanResult, Scanner
@@ -57,6 +59,8 @@ class BotApp:
         self._offset = int(db.kv_get("tg_offset", 0) or 0)
         self._cmds_set = False
         self.started_at = int(time.time())
+        # قلابِ خواندنِ پیش‌نمایشِ عمومی (در تست‌ها با تابعِ ساختگی جایگزین می‌شود)
+        self.preview_fetch = P.fetch_page
 
     # ── دسترسی ──
     def cfg_dict(self) -> Dict[str, Any]:
@@ -80,6 +84,7 @@ class BotApp:
         except Exception as e:
             log.error("getMe ناموفق: %s", e)
         await self._set_commands()
+        self._load_peer_hashes()      # access_hashهای کانال‌های خصوصی از دورهای قبل
         log.info("ربات آماده است (@%s)", self.bot_username)
         while True:
             try:
@@ -364,15 +369,21 @@ class BotApp:
             bot_admin = None
         kind = "channel"
         # اگر حسابِ کاربری وصل است، عنوان/یوزرنیمِ دقیق + نوع را از آن بگیر
-        if not title and getattr(self.user, "ready", False):
+        if (not title or not username) and getattr(self.user, "ready", False):
             try:
                 info = await self.user.resolve(tg_id if tg_id else ("@" + username))
                 if info:
                     title = info.get("title") or title
                     username = info.get("username") or username
                     kind = info.get("kind") or kind
+                    # یوزرنیمِ کانال حفظ می‌شود (اگر بعداً شناسهٔ خصوصی حل نشد استفاده می‌شود)
+                    self.user.set_hint(int(info.get("tg_id") or tg_id or 0),
+                                       username=username, title=title)
+                    self._remember_peer_hashes()
             except Exception:
                 pass
+        elif tg_id:
+            self.user.set_hint(int(tg_id), username=username, title=title)
         cid = self.db.add_channel(tg_id, title or username or str(tg_id), username, kind)
         self.pending.pop(chat, None)
         c = self.db.get_channel(cid) or {}
@@ -389,6 +400,28 @@ class BotApp:
         await self.api.send_message(
             chat, "✅ کانال ذخیره شد: <b>%s</b>%s\n\nحالا اسکن را شروع کنیم؟" % (esc(R.channel_title(c)), warn),
             kb=R.kb(rows))
+
+    def _remember_peer_hashes(self) -> None:
+        """هشِ دسترسیِ کانال‌ها را در DB نگه می‌دارد (برای کانالِ خصوصی پس از ری‌استارت)."""
+        try:
+            snap = self.user.peer_snapshot()
+        except Exception:
+            return
+        for tg_id, ah in (snap or {}).items():
+            self.db.kv_set("peerhash:%s" % tg_id, int(ah))
+
+    def _load_peer_hashes(self) -> None:
+        """هش‌های ذخیره‌شده را در حافظهٔ کلاینت برمی‌گرداند (بعد از ری‌استارت)."""
+        try:
+            for k, v in (self.db.kv_all() or {}).items():
+                if str(k).startswith("peerhash:"):
+                    tg_id = int(str(k).split(":", 1)[1])
+                    try:
+                        self.user.set_hint(tg_id, access_hash=int(v))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     async def _make_bot_admin(self, chat: int, cid: int) -> None:
         """ربات را با حسابِ کاربری ادمینِ کانال می‌کند — فقط حقِ خواندن/فوروارد، بدونِ حذف."""
@@ -444,14 +477,17 @@ class BotApp:
     async def _settings_menu(self, chat: int) -> None:
         s = self.settings
         rows: List[List[Dict[str, str]]] = []
-        for k in ("hash_mode", "th_name_ratio", "th_name_jaccard", "th_cap_ratio", "th_cap_jaccard",
-                  "size_tol_pct", "dur_tol_s", "max_forward_per_group", "media_kinds"):
+        for k in ("hash_mode", "hash_scope", "th_name_ratio", "th_name_jaccard", "th_cap_ratio", "th_cap_jaccard",
+                  "size_tol_pct", "size_tol_min", "dur_tol_s", "min_duration_s", "max_forward_per_group",
+                  "media_kinds"):
             rows.append([R.btn("⚙️ %s: %s" % (LABELS.get(k, k), getattr(s, k)), "st:%s" % k)])
         rows.append([R.btn("♻️ بازگشت به پیش‌فرض", "st:reset"), R.btn("🏠 منوی اصلی", "home")])
         await self.api.send_message(
             chat,
             "⚙️ <b>تنظیماتِ تطبیق</b>\n\n"
             "• <b>حالتِ هش</b>: <code>candidates</code> = فقط نامزدها (سریع) · <code>all</code> = همه (کند) · <code>off</code>\n"
+            "• <b>دامنهٔ هش</b>: <code>sample</code> = سر+میانه+ته (سریع، «نشانهٔ قوی») · "
+            "<code>full</code> = کلِ فایل (کند، «قطعی») — سقفِ حجمش با <code>hash_full_max_mb</code>\n"
             "• <b>آستانه‌ها</b>: هرچه کمتر، حساس‌تر (تکراریِ بیشتر) و ریسکِ اشتباه بیشتر.\n"
             "• <b>حجم/زمان</b>: تلورانسِ حجم به درصد و تلورانسِ زمان به ثانیه.\n\n"
             "برای تغییر، روی هر مورد بزنید و مقدارِ تازه را بفرستید.",
@@ -918,7 +954,8 @@ class BotApp:
                 try:
                     await self.api.edit_message_text(chat, self.scan["msg_id"],
                         R.progress_text(p.phase, c.get("title") or "", p.pct, seen=p.seen, total=p.total,
-                                        files=p.files, hashed=p.hashed, hash_total=p.hash_total, note=p.note),
+                                        files=p.files, hashed=p.hashed, hash_total=p.hash_total, note=p.note,
+                                        cur_id=p.last_msg_id, top_id=p.top_id),
                         kb=R.progress_kb() if p.phase not in ("done", "canceled", "error") else None)
                 except TgError:
                     pass
@@ -927,8 +964,11 @@ class BotApp:
         self.scan["scanner"] = scanner
 
         async def runner() -> None:
+            self.user.set_hint(int(c.get("tg_id") or 0), username=str(c.get("username") or ""),
+                               title=str(c.get("title") or ""))
             async with self._scan_lock:
                 res: ScanResult = await scanner.run(c, full=full)
+            self._remember_peer_hashes()          # access_hashهای تازه در DB می‌مانند
             await self._finish_scan(res, c)
 
         self.scan["task"] = asyncio.create_task(runner())
@@ -945,13 +985,16 @@ class BotApp:
         scan = self.db.get_scan(res.scan_id) or {}
         counts = {
             "exact": self.db.count_groups(res.scan_id, signal="exact"),
+            "content": self.db.count_groups(res.scan_id, signal="content"),
             "sizetime": self.db.count_groups(res.scan_id, signal="sizetime"),
             "name": self.db.count_groups(res.scan_id, signal="name"),
             "caption": self.db.count_groups(res.scan_id, signal="caption"),
         }
         head = {"done": "✅ اسکن تمام شد", "canceled": "⏹ اسکن کنسل شد", "error": "⚠️ خطا در اسکن"}.get(res.status, res.status)
+        self._store_notes(scan, getattr(res, "notes", None))
         txt = "%s\n\n%s" % (head, R.scan_summary_text(scan, c, counts,
-                                                       total_indexed=self.db.count_files(int(c["id"]))))
+                                                       total_indexed=self.db.count_files(int(c["id"])),
+                                                       notes=self._scan_notes(scan)))
         rows = []
         if res.groups:
             rows.append([R.btn("🔁 دیدنِ %d گروهِ تکراری" % res.groups, "l:%d:%d:all:0" % (res.scan_id, res.channel_id))])
@@ -977,14 +1020,132 @@ class BotApp:
         await self.api.send_message(chat, "⏹ درخواستِ توقف فرستاده شد…")
 
     async def _scan_limited(self, chat: int, cid: int) -> None:
-        """اسکنِ محدود با Bot API (بدونِ حسابِ کاربری): فقط پست‌های در دسترسِ ربات."""
+        """اسکنِ محدود (بدونِ حسابِ کاربری) از **پیش‌نمایشِ عمومیِ** `t.me/s/<username>`.
+
+        چه چیزی دارد: شمارهٔ پیام، تاریخ، کپشن و زمانِ ویدیو. چه چیزی ندارد: حجمِ فایل و
+        کلِ تاریخچه. پس گروه‌ها فقط بر پایهٔ نام/کپشن ساخته می‌شوند و فورواردِ فایل ممکن
+        نیست (به‌جایش «🔗 لینکِ پیام‌ها»).
+        """
         c = self.db.get_channel(cid)
         if not c:
+            await self.api.send_message(chat, "این کانال پیدا نشد.")
             return
-        await self.api.send_message(chat, "⚠️ حالتِ محدود فعلاً در این نسخه پیاده‌سازی نشده. "
-                                         "برای دیدنِ کلِ تاریخچه حسابِ کاربری را وصل کنید (🔑).")
+        uname = str(c.get("username") or "").lstrip("@").strip()
+        if not uname:
+            await self.api.send_message(
+                chat,
+                "⚠️ اسکنِ محدود فقط برای کانال‌های <b>عمومی</b> (با یوزرنیم) کار می‌کند؛ "
+                "دلیلش این است که تلگرام تاریخچهٔ کانالِ خصوصی را بدونِ حسابِ کاربری نمی‌دهد.\n\n"
+                "دو راهِ عملی:\n"
+                "① «🔑 اتصالِ حسابِ کاربری» (۳۰ ثانیه) ⇒ اسکنِ کامل با حجم و هش\n"
+                "② اگر کانال را خودتان ادمینید، «➕ ادمین‌کردنِ ربات» و بعد پست‌های تازه را "
+                "بفرستید تا با متن/کپشن مقایسه شود\n"
+                "③ یوزرنیمِ عمومیِ کانال را به ربات بدهید تا این حالت کار کند.",
+                kb=R.kb([[R.btn("🔑 اتصالِ حساب", "acc:login")],
+                         [R.btn("📡 کانال", "c:%d" % cid)]]))
+            return
+        if self._scan_lock.locked():
+            await self.api.send_message(chat, "⏳ یک اسکن دیگر در جریان است.")
+            return
+        msg = await self.api.send_message(
+            chat, R.progress_text("index", c.get("title") or uname, 2.0,
+                                  note="حالتِ محدود: خواندنِ پیش‌نمایشِ عمومیِ t.me/s/%s…" % uname),
+            kb=R.progress_kb())
+        mid = int(msg.get("message_id") or 0)
+        from .scanner import _with_norms
+        from . import matching as M
+        cfg = dict(self.cfg_dict())
+        cfg["hash_mode"] = "off"                       # بدونِ دانلود ⇒ هشی در کار نیست
+        pages = max(1, int(getattr(self.settings, "preview_pages", 6) or 6))
+        per_msg_ids = 20
+        rows: Dict[int, Dict[str, Any]] = {}
+        before = 0
+        stop = False
+        for page in range(pages):
+            try:
+                html_txt = await self.preview_fetch(uname, before=before)
+            except Exception as e:
+                log.info("preview fetch خطا (%s): %s", uname, e)
+                html_txt = ""
+            page_rows = P.parse_messages(html_txt, uname)
+            fresh = [r for r in page_rows if int(r["msg_id"]) not in rows]
+            for r in fresh:
+                r["channel_id"] = cid
+                rows[int(r["msg_id"])] = r
+            oldest = P.oldest_id(page_rows)
+            pct = min(66.0, 66.0 * float(page + 1) / float(pages))
+            try:
+                await self.api.edit_message_text(
+                    chat, mid,
+                    R.progress_text("index", c.get("title") or uname, pct,
+                                    files=len(rows),
+                                    note="صفحهٔ %d از %d · پیام‌های دیده‌شده: %d"
+                                         % (page + 1, pages, len(rows))),
+                    kb=R.progress_kb())
+            except TgError:
+                pass
+            if not page_rows or not oldest or oldest == before or len(fresh) < per_msg_ids:
+                stop = True                              # صفحهٔ خالی ⇒ به ابتدای کانال رسیدیم
+            before = oldest or before
+            if stop:
+                break
+            await asyncio.sleep(float(getattr(self.settings, "preview_delay", 1.2) or 0))
+        lst = list(rows.values())
+        if not lst:
+            try:
+                await self.api.edit_message_text(
+                    chat, mid, "⚠️ هیچ پستِ رسانه‌ای در پیش‌نمایشِ عمومیِ <code>%s</code> پیدا نشد.\n"
+                               "أما حسابِ کاربری وصل کنید تا کلِ تاریخچه خوانده شود." % esc(uname))
+            except TgError:
+                pass
+            return
+        scan_id = self.db.create_scan(cid, {"mode": "preview", "pages": pages,
+                                            "media_kinds": cfg.get("media_kinds")})
+        self.db.add_files(_with_norms(lst))
+        files = _with_norms(self.db.files_of_channel(cid))
+        clusters = M.find_clusters(files, cfg)
+        self.db.replace_groups(scan_id, cid, clusters)
+        note = ("این «اسکنِ محدود» است: فقط چند صفحهٔ آخرِ کانالِ عمومی و فقط بر پایهٔ "
+                "کپشن/نام — حجم و هش در دسترسِ تلگرام نیست. برای اسکنِ کامل، حسابِ کاربری را وصل کنید.")
+        self.db.update_scan(scan_id, status="done", phase="done", finished_at=int(time.time()),
+                            total_msgs=len(lst), seen_msgs=len(lst), files_found=len(lst),
+                            hashed=0, groups_found=len(clusters),
+                            params=json.dumps({"mode": "preview", "pages": pages, "notes": [note]},
+                                              ensure_ascii=False))
+        self.db.set_channel_scan(cid, scan_id, int(time.time()))
+        try:
+            await self.api.edit_message_text(chat, mid, "✅ اسکنِ محدود تمام شد — گزارش:",
+                                             kb=None)
+        except TgError:
+            pass
+        await self._summary(chat, scan_id, cid)
 
     # ═════════════════════ نتیجه‌ها ═════════════════════
+    @staticmethod
+    def _scan_notes(scan: Dict[str, Any]) -> List[str]:
+        """هشدارهای ذخیره‌شدهٔ اسکن (در `params` به‌صورتِ JSON نگه داشته می‌شوند)."""
+        try:
+            params = scan.get("params")
+            data = json.loads(params) if isinstance(params, str) else (params or {})
+            notes = data.get("notes") if isinstance(data, dict) else None
+            return [str(x) for x in notes] if isinstance(notes, list) else []
+        except Exception:
+            return []
+
+    def _store_notes(self, scan: Dict[str, Any], notes: Optional[List[str]]) -> None:
+        """هشدارها را در `params` می‌نویسد تا در گزارش‌های بعدی هم دیده شوند."""
+        if not notes:
+            return
+        try:
+            params = scan.get("params")
+            data = json.loads(params) if isinstance(params, str) else (params or {})
+            if not isinstance(data, dict):
+                data = {}
+            data["notes"] = [str(x) for x in notes]
+            self.db.update_scan(int(scan.get("id") or 0), params=json.dumps(data, ensure_ascii=False))
+        except Exception:
+            pass
+
     async def _summary(self, chat: int, scan_id: int, cid: int, edit: Optional[int] = None) -> None:
         scan = self.db.get_scan(scan_id)
         c = self.db.get_channel(cid)
@@ -992,10 +1153,12 @@ class BotApp:
             await self.api.send_message(chat, "اسکن پیدا نشد.")
             return
         counts = {"exact": self.db.count_groups(scan_id, signal="exact"),
+                  "content": self.db.count_groups(scan_id, signal="content"),
                   "sizetime": self.db.count_groups(scan_id, signal="sizetime"),
                   "name": self.db.count_groups(scan_id, signal="name"),
                   "caption": self.db.count_groups(scan_id, signal="caption")}
-        txt = R.scan_summary_text(scan, c, counts, total_indexed=self.db.count_files(cid))
+        txt = R.scan_summary_text(scan, c, counts, total_indexed=self.db.count_files(cid),
+                                  notes=self._scan_notes(scan))
         rows = [[R.btn("🔁 دیدنِ گروه‌ها", "l:%d:%d:all:0" % (scan_id, cid))],
                 [R.btn("📤 فورواردِ همهٔ تکراری‌ها", "fa:%d:%d:all:0" % (scan_id, cid))],
                 [R.btn("🔍 اسکن مجدد", "scan:full:%d" % cid), R.btn("📡 کانال", "c:%d" % cid)]]
@@ -1009,7 +1172,7 @@ class BotApp:
         kw: Dict[str, Any] = {}
         if filt == "exact":
             kw["signal"] = "exact"
-        elif filt in ("sizetime", "name", "caption"):
+        elif filt in ("content", "sizetime", "name", "caption"):
             kw["signal"] = filt
         if filt == "open":
             kw["only_open"] = True
@@ -1087,7 +1250,7 @@ class BotApp:
             if str(g.get("state") or "open") == "ignored":       # تصمیمِ کاربر: رد
                 continue
             if self.db.kv_get("fwd:%d:%d" % (scan_id, int(g["id"]))):
-                continue                                          # قبلاً فرستاده شده
+                continue                                          # قبلاً کامل فرستاده شده
             todo.append(g)
         if not todo:
             await self.api.send_message(
@@ -1108,6 +1271,7 @@ class BotApp:
         await self.api.send_chat_action(chat, "upload_document")
         for gi, item in enumerate(plan):
             g, members = item["g"], item["members"]
+            before_files = sent_files                              # برای شمارشِ درستِ گروه‌های واقعاً فرستاده‌شده
             if sent_files >= budget:                              # سهمِ این نوبت تمام شد
                 break
             gid = int(g["id"])
@@ -1116,15 +1280,21 @@ class BotApp:
             by_id = sorted(members, key=lambda m: int(m.get("msg_id") or 0))
             orig = int(by_id[0].get("msg_id") or 0)
             dupes = [int(m.get("msg_id") or 0) for m in by_id[1:]]
-            head = ("📤 <b>گروهِ %d از %d</b> %s\n<b>%s</b> · %d فایل\n<i>%s</i>\n"
-                    "🆕 اصلی‌ترین پست: <code>%s</code> · تکراری‌ها: <code>%s</code>" % (
-                        gi + 1, len(plan), stars, esc(R.channel_title(c)), len(by_id),
-                        esc(g.get("reason") or ""), orig,
-                        ", ".join(str(x) for x in dupes[:25]) or "—"))
-            await self.api.send_message(chat, head)
+            # اگر نوبتِ قبل وسطِ همین گروه تمام شد، از همان‌جا ادامه می‌دهیم (فایل دوباره فرستاده نمی‌شود)
+            off = int(self.db.kv_get("fwd:%d:%d:off" % (scan_id, gid), 0) or 0)
+            if off > 0:
+                await self.api.send_message(
+                    chat, "📤 <b>ادامهٔ گروهِ %d از %d</b> %s — از فایلِ %d ادامه می‌دهیم." % (
+                        gi + 1, len(plan), stars, off + 1))
+            else:
+                head = ("📤 <b>گروهِ %d از %d</b> %s\n<b>%s</b> · %d فایل\n<i>%s</i>\n"
+                        "🆕 اصلی‌ترین پست: <code>%s</code> · تکراری‌ها: <code>%s</code>" % (
+                            gi + 1, len(plan), stars, esc(R.channel_title(c)), len(by_id),
+                            esc(g.get("reason") or ""), orig,
+                            ", ".join(str(x) for x in dupes[:25]) or "—"))
+                await self.api.send_message(chat, head)
             # فایل‌ها را تا سقفِ این نوبت می‌فرستیم؛ گروه فقط وقتی «تمام‌شده» علامت می‌خورد
             # که همهٔ اعضایش فرستاده شده باشند (تا با «ادامه» ناقص نماند).
-            off = 0
             while off < len(by_id) and sent_files < budget:
                 res = await self.reporter.forward_group(chat, c, by_id, offset=off)
                 sent_files += res["sent"]
@@ -1132,10 +1302,14 @@ class BotApp:
                 off = res["offset"]
                 if res["sent"] == 0:
                     break                                         # چیزی نرفت ⇒ بی‌فایده است ادامه
-            sent_groups += 1
+            if sent_files > before_files:
+                sent_groups += 1
             full = (off >= len(by_id))
             if full:
                 self.db.kv_set("fwd:%d:%d" % (scan_id, gid), 1)
+                self.db.kv_set("fwd:%d:%d:off" % (scan_id, gid), 0)
+            else:
+                self.db.kv_set("fwd:%d:%d:off" % (scan_id, gid), int(off))   # ادامه از همین‌جا
             self.db.log_action("fwd_all", "scan=%s group=%s sent_files=%s full=%s" % (
                 scan_id, gid, sent_files, full))
         remaining_groups = len([g for g in todo if not self.db.kv_get("fwd:%d:%d" % (scan_id, int(g["id"])))])
@@ -1147,8 +1321,9 @@ class BotApp:
         done_files = sum(len([m for m in self.db.group_members(g["id"]) if str(m.get("state") or "") != "ignored"])
                          for g in all_sel if self.db.kv_get("fwd:%d:%d" % (scan_id, int(g["id"]))))
         lines = ["📤 <b>فورواردِ همهٔ تکراری‌ها</b> — %s" % esc(R.channel_title(c)),
-                 "این نوبت: <b>%d</b> گروه · <b>%d</b> فایل (از <b>%d</b> فایلِ باقی‌مانده)" % (
-                     sent_groups, sent_files, total_files),
+                 "این نوبت: <b>%d</b> گروه · <b>%d</b> فایل (از <b>%d</b> فایلی که این نوبت "
+                 "در نوبت بود؛ سقفِ هر نوبت <b>%d</b> فایل)" % (
+                     sent_groups, sent_files, total_files, budget),
                  "کلِ این فیلتر: <b>%d</b> گروه · <b>%d</b> فایل — تا حالا <b>%d</b> فایل از <b>%d</b> گروه" % (
                      len(all_sel), all_files, done_files, done_groups)]
         if failed:
@@ -1198,9 +1373,16 @@ class BotApp:
                     await self._ask_add_channel(chat)
                 elif sub == "del":
                     cid = int(parts[2])
-                    self.db.delete_channel(cid)
-                    await self.api.send_message(chat, "🗑 از فهرستِ ربات حذف شد (هیچ فایلی در تلگرام پاک نشد).",
-                                                kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")]]))
+                    stats = self.db.delete_channel(cid) or {}
+                    await self.api.send_message(
+                        chat,
+                        "🗑 از فهرستِ ربات حذف شد و تمامِ داده‌هایش از دیتابیس پاک شد:\n"
+                        "• فایل‌ها: <b>%s</b>\n• اسکن‌ها: <b>%s</b>\n• گروه‌ها: <b>%s</b>\n"
+                        "• اعضای گروه‌ها: <b>%s</b>\n\n"
+                        "<i>هیچ فایلی در تلگرام پاک نشد.</i>" % (
+                            int(stats.get("files") or 0), int(stats.get("scans") or 0),
+                            int(stats.get("groups") or 0), int(stats.get("group_members") or 0)),
+                        kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")]]))
             elif op == "c":
                 await self._channel_view(chat, int(parts[1]))
             elif op == "acc":
