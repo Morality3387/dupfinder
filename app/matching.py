@@ -193,6 +193,21 @@ def candidate_pairs(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
         seen.add(k)
         pairs.append(k)
 
+    # اطمینان از پر بودنِ نام‌های نرمال‌شده: اگر کسی ردیف را مستقیم ساخته باشد
+    # (بدونِ `name_norm`/`caption_norm`)، اینجا از روی نامِ فایل/کپشن ساخته می‌شود
+    # تا سیگنالِ «نام» بی‌صدا از دست نرود.
+    if any(str(f.get(field) or "").strip() == "" and str(f.get(src) or "").strip()
+           for f in files for field, src in (("name_norm", "file_name"), ("caption_norm", "caption"))):
+        fixed = []
+        for f in files:
+            d = dict(f)
+            if not str(d.get("name_norm") or "").strip():
+                d["name_norm"] = S.name_norm(d.get("file_name"))
+            if not str(d.get("caption_norm") or "").strip():
+                d["caption_norm"] = S.caption_norm(d.get("caption"))
+            fixed.append(d)
+        files = fixed
+
     generic_captions = generic_captions if generic_captions is not None else generic_values(files, "caption_norm")
     generic_names = generic_names if generic_names is not None else generic_values(files, "name_norm")
 
