@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import sys
+import time
 
 # امکانِ اجرا از هر پوشه‌ای
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +23,12 @@ from app.tg_api import TgApi            # noqa: E402
 from app.user_client import UserClient  # noqa: E402
 
 log = logging.getLogger("dup")
+_STARTED_AT = time.time()          # برای uptime_s در /health (قبلاً اشتباهاً از ساعتِ monotonic خوانده می‌شد)
+
+
+def uptime_seconds() -> int:
+    """ثانیه‌های سپری‌شده از شروعِ برنامه (نه ساعتِ monotonic — باگی که کاربر گرفت)."""
+    return int(max(0.0, time.time() - _STARTED_AT))
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -60,7 +67,8 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
         body = {
             "ok": True,
             "app": "dupfinder",
-            "uptime_s": int(asyncio.get_event_loop().time()),
+            "uptime_s": uptime_seconds(),
+            "started_at": int(_STARTED_AT),
             "channels": st["channels"],
             "files": st["files"],
             "scans": st["scans"],
