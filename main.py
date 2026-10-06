@@ -24,7 +24,7 @@ from app.user_client import UserClient  # noqa: E402
 
 log = logging.getLogger("dup")
 _STARTED_AT = time.time()          # برای uptime_s در /health (قبلاً اشتباهاً از ساعتِ monotonic خوانده می‌شد)
-REV = "2026-10-06-dk11"             # برچسبِ نسخه (در /health دیده می‌شود)
+REV = "2026-10-06-dk12"             # برچسبِ نسخه (در /health دیده می‌شود)
 
 
 def uptime_seconds() -> int:
