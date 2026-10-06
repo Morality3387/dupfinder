@@ -98,7 +98,7 @@ def test_owner_adds_admin_by_id_and_admin_can_use_bot():
         # ادمین: «⚙️ تنظیمات» آزاد است (درخواستِ کاربر: با حسابِ ادمین کار می‌کند)
         e.tap("st:menu", uid=5001, chat=5001)
         assert "تنظیماتِ تطبیق" in e.last_to(5001)
-        e.tap("st:hash_scope", uid=5001, chat=5001)
+        e.tap("sta:hash_scope", uid=5001, chat=5001)
         e.text("full", uid=5001, chat=5001)
         assert e.settings.hash_scope == "full", "ادمین تنظیمات را ذخیره نکرد"
         # ولی بخش‌های مالکانه: پیامِ روشن می‌گیرد (نه سکوت)
