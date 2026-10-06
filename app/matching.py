@@ -88,9 +88,12 @@ def _size_window_pairs(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
         بعد از آن هم فایلِ هم‌حجمِ دقیق در همین پنجره باشد.
       • جفت‌های حذف‌شده شمرده و در `stats` برگردانده می‌شوند.
     """
+    exhaustive = bool(cfg.get("exhaustive_pairs") or cfg.get("match_all_pairs"))
     cap = int(cfg.get("size_pair_cap") or per_item_cap or 240)
     cap = max(8, cap)
     exact_cap = max(cap, int(cfg.get("size_pair_exact_cap") or 400))
+    if exhaustive:                                  # «هیچ جفتی را جا نگذار» (کندتر)
+        cap = exact_cap = 1 << 30
     order = sorted(range(len(files)), key=lambda i: int(files[i].get("size") or 0))
     tol_min = int(cfg.get("size_tol_min", 2048))
     tol_pct = float(cfg.get("size_tol_pct", 0.5))
@@ -135,7 +138,9 @@ def _duration_pairs(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
     تضمین می‌کند پر شدنِ سقفِ پنجره باعثِ ازقلم‌افتادنِ تکراری نشود.
     """
     min_dur = int(cfg.get("min_duration_s", 3) or 3)
-    chain = max(8, int(cfg.get("duration_pair_cap") or 60))
+    exhaustive = bool(cfg.get("exhaustive_pairs") or cfg.get("match_all_pairs"))
+    cap = max(8, int(cfg.get("duration_pair_cap") or 600))
+    win = max(2, int(cfg.get("duration_dense_window") or 40))
     by_dur: Dict[int, List[int]] = defaultdict(list)
     for i, f in enumerate(files):
         d = int(f.get("duration") or 0)
@@ -145,11 +150,42 @@ def _duration_pairs(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
     for _d, ids in by_dur.items():
         if len(ids) < 2:
             continue
-        for a in range(len(ids)):
-            for b in range(a + 1, min(len(ids), a + 1 + chain)):
-                yield ids[a], ids[b]
-            if len(ids) - a - 1 > chain:
-                dropped += len(ids) - a - 1 - chain
+        if exhaustive or len(ids) <= cap:
+            for a in range(len(ids)):
+                for b in range(a + 1, len(ids)):
+                    yield ids[a], ids[b]
+            continue
+        # سبدِ پُر (مثلاً ۵۰۰ کلیپِ هم‌زمان): نباید فقط به ۶۰ همسایهٔ اول محدود شود.
+        # ① هم‌حجم‌های **دقیق** (جایی که فایلِ یکسان می‌ایستد) بدونِ سقف، زنجیره‌ای
+        # ② بقیه با پنجرهٔ پهن‌ترِ `duration_dense_window` روی ترتیبِ حجم
+        # ③ هر جفتی که بررسی نشد شمرده می‌شود تا در گزارش به کاربر گفته شود.
+        by_size: Dict[int, List[int]] = defaultdict(list)
+        for i in ids:
+            by_size[int(files[i].get("size") or 0)].append(i)
+        exact_done = 0
+        for group in by_size.values():
+            if len(group) < 2:
+                continue
+            if len(group) <= cap:
+                for a in range(len(group)):
+                    for b in range(a + 1, len(group)):
+                        yield group[a], group[b]
+                exact_done += len(group) * (len(group) - 1) // 2
+                continue
+            for a in range(len(group)):
+                hi = min(len(group), a + 1 + win)
+                for b in range(a + 1, hi):
+                    yield group[a], group[b]
+                exact_done += max(0, hi - (a + 1))
+        ordered = sorted(ids, key=lambda i: (int(files[i].get("size") or 0), int(files[i].get("msg_id") or 0)))
+        window_done = 0
+        for a in range(len(ordered)):
+            hi = min(len(ordered), a + 1 + win)
+            for b in range(a + 1, hi):
+                yield ordered[a], ordered[b]
+            window_done += max(0, hi - (a + 1))
+        total = len(ordered) * (len(ordered) - 1) // 2
+        dropped += max(0, total - exact_done - window_done)
     if stats is not None and dropped:
         stats["duration_pairs_dropped"] = int(stats.get("duration_pairs_dropped", 0)) + dropped
 
@@ -180,6 +216,7 @@ def candidate_pairs(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
     """جفت‌های نامزدی که ارزشِ بررسی دارند (نامزدِ هر سه سیگنال).
 
     `stats` آمارِ نامزدسازی را نگه می‌دارد (مثلِ تعدادِ جفت‌های بررسی‌نشده).
+    با `cfg["exhaustive_pairs"]=True` هیچ جفتی به‌خاطرِ سقف حذف نمی‌شود (کندتر، دقیق‌تر).
     """
     pairs: List[Tuple[int, int]] = []
     seen: Set[Tuple[int, int]] = set()
