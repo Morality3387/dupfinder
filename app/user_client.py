@@ -500,14 +500,29 @@ class UserClient:
 
     async def iter_videos(self, tg_id: int, *, min_id: int = 0, max_id: int = 0,
                           media_kinds: str = "video", wait_time: float = 0.3,
-                          batch: int = 200) -> AsyncIterator[Dict[str, Any]]:
-        """پیمایشِ **کاملِ** تاریخچه (قدیم → جدید) و بازگرداندنِ فایل‌های ویدیویی."""
+                          batch: int = 200, stats: Optional[Dict[str, Any]] = None) -> AsyncIterator[Dict[str, Any]]:
+        """پیمایشِ **کاملِ** تاریخچه (قدیم → جدید) و بازگرداندنِ فایل‌های ویدیویی.
+
+        `stats` (اختیاری) آمارِ مسیر را نگه می‌دارد: `visited` تعدادِ پیام‌هایی که واقعاً
+        پیمایش شد، `matched` تعدادِ فایل‌های بازگردانده‌شده و `completed=True` یعنی
+        پیمایش بدونِ خطا تا انتهای تاریخچه رسید. اسکنر از همین برای تصمیمِ «پاک‌سازیِ
+        رکوردهای حذف‌شده» استفاده می‌کند تا «کانالِ خالی» با «خطای گذرا» قاطی نشود.
+        """
+        if stats is not None:
+            stats.clear()
+            stats["visited"] = 0
+            stats["matched"] = 0
+            stats["completed"] = False
         ent = await self._entity(tg_id)
+        if stats is not None:
+            stats["entity_ok"] = True
         buf: List[Dict[str, Any]] = []
         kwargs: Dict[str, Any] = {"min_id": int(min_id or 0), "reverse": True, "wait_time": float(wait_time or 0)}
         if max_id:
             kwargs["max_id"] = int(max_id)
         async for msg in self.client.iter_messages(ent, **kwargs):
+            if stats is not None:
+                stats["visited"] = int(stats["visited"]) + 1
             if getattr(msg, "action", None) is not None and getattr(msg, "media", None) is None:
                 continue
             row = self.msg_to_file(msg)
@@ -515,6 +530,8 @@ class UserClient:
                 continue
             if not _kind_ok(row, media_kinds):
                 continue
+            if stats is not None:
+                stats["matched"] = int(stats["matched"]) + 1
             buf.append(row)
             if len(buf) >= batch:
                 for r in buf:
@@ -522,6 +539,33 @@ class UserClient:
                 buf = []
         for r in buf:
             yield r
+        if stats is not None:
+            stats["completed"] = True
+
+    async def channel_is_empty(self, tg_id: int) -> bool:
+        """آیا کانال **واقعاً** هیچ پیامی ندارد؟ (برای پاک‌سازیِ ایمنِ ایندکسِ خالی)
+
+        فقط وقتی `True` می‌دهد که تلگرام صریحاً بگوید پیامی نیست: هم `get_messages(limit=1)`
+        خالی باشد و هم تعدادِ پیام‌های تاریخچه صفر. اگر هر خطا/ابهامی بود `False` برمی‌گردد
+        تا هیچ‌وقت رکوردهای سالم به‌خاطرِ خطای گذرا پاک نشوند.
+        """
+        try:
+            ent = await self._entity(tg_id)
+        except Exception:
+            return False
+        try:
+            msgs = await self.client.get_messages(ent, limit=1)
+            if msgs:
+                return False
+        except Exception:
+            return False
+        try:
+            info = await self.probe(tg_id)
+            if int(info.get("total") or 0) > 0 or int(info.get("last_id") or 0) > 0:
+                return False
+        except Exception:
+            return False
+        return True
 
     async def probe(self, tg_id: int) -> Dict[str, Any]:
         """{total, last_id, title} — برای نوارِ درصدِ اسکن.
