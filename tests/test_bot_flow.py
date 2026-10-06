@@ -72,6 +72,17 @@ class Env:
     def last(self):
         return self.api.sent[-1]["text"] if self.api.sent else ""
 
+    def last_to(self, chat_id: int):
+        """آخرین پیامی که به یک چتِ مشخص فرستاده شد (چون ربات حالا به مالک هم اطلاع می‌دهد)."""
+        for m in reversed(self.api.sent):
+            if int(m.get("chat_id") or 0) == int(chat_id):
+                return str(m.get("text") or "")
+        return ""
+
+    def msg_to(self, chat_id: int, needle: str) -> bool:
+        return any(int(m.get("chat_id") or 0) == int(chat_id) and needle in str(m.get("text") or "")
+                   for m in self.api.sent)
+
     def last_view(self):
         """آخرین چیزی که کاربر می‌بیند: بر اساسِ ترتیبِ واقعیِ فراخوانی‌ها."""
         for method, params in reversed(self.api.calls):
@@ -128,12 +139,16 @@ def test_start_menu_help_and_owner_only():
         assert "تاریخچهٔ کامل" in e.last()
         e.text("/status")
         assert "وضعیت" in e.last() and "حسابِ کاربری" in e.last()
-        # غیرمالک هیچ داده‌ای نمی‌بیند
+        # غیرمالک هیچ داده‌ای نمی‌بیند (و مالک یک‌بار خبردار می‌شود تا بتواند ادمینش کند)
         before = len(e.api.sent)
         e.text("/start", uid=4242)
-        assert "خصوصی" in e.last() and len(e.api.sent) == before + 1
+        assert "خصوصی" in e.last_to(CHAT)                  # به خودِ غریبه
+        assert len(e.api.sent) == before + 2              # ① رد به غریبه ② اطلاع به مالک
+        assert e.msg_to(OWNER, "درخواستِ دسترسی")          # مالک خبردار می‌شود
+        assert e.kb_btn("افزودن به‌عنوان ادمین") is not None
         e.tap("ch:list", uid=4242)
-        assert "خصوصی" in e.last()
+        assert "خصوصی" in e.last_to(CHAT)
+        assert "کانالِ تست" not in e.last_to(CHAT)
         e.close()
 
 
