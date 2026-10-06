@@ -194,9 +194,39 @@ class Db:
     def list_channels(self) -> List[Dict[str, Any]]:
         return [dict(r) for r in self._all("SELECT * FROM channels ORDER BY id")]
 
-    def delete_channel(self, cid: int) -> None:
-        self._exec("DELETE FROM channels WHERE id=?", (cid,))
+    def delete_channel(self, cid: int) -> Dict[str, int]:
+        """حذفِ کانال **به‌همراهِ همهٔ داده‌های وابسته** (فایل‌ها، اسکن‌ها، گروه‌ها، اعضا).
+
+        قبلاً فقط ردیفِ `channels` پاک می‌شد و رکوردهای orphan در `files`/`scans`/
+        `groups`/`group_members` می‌ماندند (حجمِ دیتابیس بی‌دلیل بزرگ می‌شد).
+        این‌جا به‌ترتیبِ وابستگی حذف می‌کنیم و آمارِ حذف‌شده‌ها را برمی‌گردانیم.
+        """
+        cid = int(cid)
+        out: Dict[str, int] = {}
+        rows = self._all("SELECT id FROM groups WHERE channel_id=?", (cid,))
+        gids = [int(r["id"]) for r in rows]
+        # اعضای گروه‌ها + خودِ گروه‌ها
+        n_members = 0
+        for gid in gids:
+            cur = self._exec("DELETE FROM group_members WHERE group_id=?", (gid,))
+            n_members += int(getattr(cur, "rowcount", 0) or 0)
+        out["group_members"] = n_members
+        out["groups"] = len(gids)
+        self._exec("DELETE FROM groups WHERE channel_id=?", (cid,))
+        out["scans"] = int(getattr(self._exec("DELETE FROM scans WHERE channel_id=?", (cid,)),
+                                  "rowcount", 0) or 0)
+        out["files"] = int(getattr(self._exec("DELETE FROM files WHERE channel_id=?", (cid,)),
+                                  "rowcount", 0) or 0)
+        out["channels"] = int(getattr(self._exec("DELETE FROM channels WHERE id=?", (cid,)),
+                                     "rowcount", 0) or 0)
+        # کلیدهای kv متعلق به این کانال (ادمین‌بودنِ ربات — ستونِ کلید `k` است نه `key`)
+        try:
+            self._exec("DELETE FROM kv WHERE k IN (?,?,?)",
+                       ("botadmin:%d" % cid, "fwd_channel:%d" % cid, "peerhash:%d" % cid))
+        except Exception:
+            pass
         self.conn.commit()
+        return out
 
     def set_channel_scan(self, cid: int, scan_id: int, at: int) -> None:
         self._exec("UPDATE channels SET last_scan_id=?, last_scan_at=? WHERE id=?", (scan_id, at, cid))
@@ -318,6 +348,8 @@ class Db:
             sql += " AND exact=1"
         elif signal == "sizetime":
             sql += " AND sizetime=1"
+        elif signal == "content":
+            sql += " AND reason LIKE '%نمونهٔ محتوا%'"
         elif signal == "name":
             sql += " AND reason LIKE '%نام%'"
         elif signal == "caption":
