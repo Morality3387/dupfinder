@@ -79,6 +79,10 @@ class Env:
                 return str(m.get("text") or "")
         return ""
 
+    def last_kb(self):
+        """دکمه‌های آخرین پیامِ ارسالی (برای ادعاهای مربوط به کیبورد)."""
+        return ((self.api.sent[-1].get("kb") or {}).get("inline_keyboard") or []) if self.api.sent else []
+
     def msg_to(self, chat_id: int, needle: str) -> bool:
         return any(int(m.get("chat_id") or 0) == int(chat_id) and needle in str(m.get("text") or "")
                    for m in self.api.sent)
@@ -411,7 +415,10 @@ def test_settings_change_validation_and_reset():
         assert e.settings.hash_mode == "all"
         e.tap("st:hash_mode")
         e.text("چیزِ بی‌ربط")
-        assert e.settings.hash_mode == "all" and "فقط off" in e.last()
+        assert e.settings.hash_mode == "all" and "مقدارِ نامعتبر" in e.last()
+        assert e.bot.pending.get(CHAT, {}).get("key") == "hash_mode", "حالتِ انتظار پاک شد"
+        e.text("همه")                                   # مترادفِ فارسی، در همان حالتِ انتظار
+        assert e.settings.hash_mode == "all"
         e.tap("st:size_time_require_one_exact")
         e.text("0")
         assert e.settings.size_time_require_one_exact is False
