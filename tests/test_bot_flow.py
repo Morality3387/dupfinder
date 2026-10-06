@@ -356,14 +356,14 @@ def test_login_wrong_code_offers_fresh_code():
         e.text("12345", mid=11)
         e.text("z" * 32, mid=12)
         e.text("+989120000000", mid=13)
-        e.text("77777", mid=14)                 # کدِ اشتباه
+        e.text("7 7 7 7 7", mid=14)                 # کدِ اشتباه
         assert "کد اشتباه" in e.last()
         assert e.bot.pending.get(CHAT) is not None          # وضعیت حفظ می‌شود
         assert e.kb_btn("کدِ تازه")                          # دکمهٔ «کدِ تازه» هست
         n = len(e.user.code_requests)
         e.tap("acc:resend")                                 # درخواستِ کدِ تازه
         assert len(e.user.code_requests) == n + 1 and "کدِ تازه" in e.last()
-        e.text("55555", mid=15)                             # کدِ درست
+        e.text("5 5 5 5 5", mid=15)                             # کدِ درست
         assert "وصل شد" in e.last() and e.db.kv_get("session_string") == "FAKE_SESSION"
         e.close()
 
@@ -376,12 +376,12 @@ def test_login_expired_code_then_resend_succeeds():
         e.text("12345", mid=11)
         e.text("z" * 32, mid=12)
         e.text("+989120000000", mid=13)
-        e.text("99999", mid=14)                 # کدِ پیامِ قبلی ⇒ منقضی
-        assert "باطل/منقضی" in e.last() and "کدِ تازه" in e.last()
+        e.text("9 9 9 9 9", mid=14)                 # کدِ پیامِ قبلی ⇒ منقضی
+        assert "این کد پذیرفته نشد" in e.last() and "کدِ تازه" in e.last()
         assert e.bot.pending.get(CHAT)["kind"] == "login_code"
         e.tap("acc:resend")
         assert "کدِ تازه فرستاده شد" in e.last()
-        e.text("55555", mid=15)
+        e.text("5 5 5 5 5", mid=15)
         assert "وصل شد" in e.last()
         e.close()
 
@@ -408,7 +408,7 @@ def test_login_phone_by_contact_button():
                                     "contact": {"phone_number": "989123456789", "user_id": OWNER}}))
         assert e.user.code_requests == ["+989123456789"]          # نرمال‌سازیِ شماره
         assert "کدِ پیامک/تلگرام" in e.last()
-        e.text("55555", mid=22)
+        e.text("5 5 5 5 5", mid=22)
         assert "وصل شد" in e.last() and e.db.kv_get("session_string") == "FAKE_SESSION"
         e.close()
 
@@ -428,7 +428,7 @@ def test_login_password_retry():
         e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
         e.tap("acc:login")
         e.text("+989120000000", mid=13)
-        e.text("11111", mid=14)                    # نیاز به رمزِ دو مرحله‌ای
+        e.text("1 1 1 1 1", mid=14)                    # نیاز به رمزِ دو مرحله‌ای
         assert "رمزِ دو مرحله‌ای" in e.last()
         e.text("nope", mid=15)
         assert "تلاشِ ۱ از ۳" in e.last()
@@ -442,10 +442,40 @@ def test_login_password_three_wrong_locks_out():
         e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
         e.tap("acc:login")
         e.text("+989120000000", mid=13)
-        e.text("11111", mid=14)
+        e.text("1 1 1 1 1", mid=14)
         for i in range(3):
             e.text("bad%d" % i, mid=20 + i)
         assert "سه بار" in e.last() and e.bot.pending.get(CHAT) is None
+        e.close()
+
+
+def test_login_joined_code_is_refused_and_resend_works():
+    """تلگرام کدِ یک‌پارچه را «قبلاً به‌اشتراک‌گذاشته» می‌داند ⇒ ربات نباید تلاش کند."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.text("+989120000000", mid=13)
+        e.text("55555", mid=14)                  # ⛔️ چسبیده
+        assert "قبول نکردم" in e.last()
+        assert e.user.sign_in_calls == []        # هیچ تلاشی به تلگرام نرفت
+        assert e.kb_btn("کدِ تازه")
+        e.tap("acc:resend")                      # کدِ تازه (کدِ قبلی سوخته)
+        assert "کدِ تازه فرستاده شد" in e.last()
+        e.text("5 5 5 5 5", mid=15)              # ✅ رقم‌رقم
+        assert e.user.sign_in_calls == ["55555"]
+        assert "وصل شد" in e.last() and e.db.kv_get("session_string") == "FAKE_SESSION"
+        e.close()
+
+
+def test_login_code_accepts_dots_dashes_and_rejects_junk():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.text("+989120000000", mid=13)
+        e.text("سلام", mid=14)                   # متنِ نامربوط
+        assert "کدِ ورود نیست" in e.last() and e.user.sign_in_calls == []
+        e.text("5.5.5.5.5", mid=15)              # ✅ با نقطه
+        assert "وصل شد" in e.last()
         e.close()
 
 
