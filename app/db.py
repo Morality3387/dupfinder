@@ -249,6 +249,21 @@ class Db:
         self.conn.commit()
         return out
 
+    def set_channel_title(self, cid: int, title: str = "", username: str = "") -> None:
+        """نام/یوزرنیمِ تازه‌یافتهٔ کانال را ذخیره می‌کند (فقط فیلدهای غیرخالی)."""
+        sets, args = [], []
+        if str(title or "").strip():
+            sets.append("title=?")
+            args.append(str(title).strip())
+        if str(username or "").strip():
+            sets.append("username=?")
+            args.append(str(username).strip().lstrip("@"))
+        if not sets:
+            return
+        args.append(int(cid))
+        self._exec("UPDATE channels SET %s WHERE id=?" % ",".join(sets), tuple(args))
+        self.conn.commit()
+
     def set_channel_username(self, cid: int, username: str) -> None:
         """به‌روزرسانیِ یوزرنیمِ کانال (مثلاً بعد از تغییرِ یوزرنیم یا برای حالتِ خصوصی)."""
         self._exec("UPDATE channels SET username=? WHERE id=?", (str(username or "").lstrip("@"), int(cid)))
