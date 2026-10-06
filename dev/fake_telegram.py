@@ -162,6 +162,7 @@ class FakeUser:
         self.last_error = ""
         self.probed: List[int] = []
         self.code_requests: List[str] = []      # شماره‌هایی که برایشان کد خواسته شده
+        self.sign_in_calls: List[str] = []      # کدهایی که برای ورود تلاش شده
 
     # ── وضعیت ──
     @property
@@ -185,6 +186,7 @@ class FakeUser:
 
     async def sign_in(self, phone: str, code: str, phone_code_hash: str = "") -> Dict[str, Any]:
         """۵۵۵۵۵ ✅ · ۱۱۱۱۱ رمزِ دو مرحله‌ای · ۹۹۹۹۹ کدِ منقضی · ۷۷۷۷۷ کدِ اشتباه."""
+        self.sign_in_calls.append(str(code))
         c = str(code).replace(" ", "").replace("-", "")
         if c == "55555":
             self._ready = True
