@@ -5,11 +5,9 @@ import asyncio
 import logging
 import re
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import matching as M
 from . import report as R
-from . import similarity as S
 from .config import LABELS, Settings
 from .scanner import Progress, ScanResult, Scanner
 from .tg_api import TgError, esc
@@ -1149,7 +1147,8 @@ class BotApp:
         done_files = sum(len([m for m in self.db.group_members(g["id"]) if str(m.get("state") or "") != "ignored"])
                          for g in all_sel if self.db.kv_get("fwd:%d:%d" % (scan_id, int(g["id"]))))
         lines = ["📤 <b>فورواردِ همهٔ تکراری‌ها</b> — %s" % esc(R.channel_title(c)),
-                 "این نوبت: <b>%d</b> گروه · <b>%d</b> فایل" % (sent_groups, sent_files),
+                 "این نوبت: <b>%d</b> گروه · <b>%d</b> فایل (از <b>%d</b> فایلِ باقی‌مانده)" % (
+                     sent_groups, sent_files, total_files),
                  "کلِ این فیلتر: <b>%d</b> گروه · <b>%d</b> فایل — تا حالا <b>%d</b> فایل از <b>%d</b> گروه" % (
                      len(all_sel), all_files, done_files, done_groups)]
         if failed:
