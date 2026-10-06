@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import similarity as S
 from .tg_api import esc
@@ -131,7 +131,7 @@ def group_detail_text(channel: Dict[str, Any], g: Dict[str, Any], members: Seque
             len(members), uniq_sizes, uniq_dur),
         "",
     ]
-    m0, m1 = members[0], members[-1]
+    m0 = members[0]
     lines.append("📐 نمونه: <b>%s</b> · <b>%s</b>" % (S.human_bytes(m0.get("size")), S.human_duration(m0.get("duration"))))
     if str(g.get("state") or "open") != "open":
         lines.append("وضعیت: %s" % ("✔ رسیدگی‌شده" if g.get("state") == "done" else "🔒 نادیده‌گرفته‌شده"))
