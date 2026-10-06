@@ -34,6 +34,32 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 
 ⚠️ <b>ربات هیچ‌چیز را پاک/ویرایش نمی‌کند</b> — فقط می‌خواند و فوروارد می‌کند. تصمیمِ پاک‌کردن کاملاً با شماست.
 
+🩺 <b>چه دسترسی‌ای لازم است؟</b> (پاسخِ کوتاه: «اکانت لازم نیست ادمین باشد»)
+• <b>اسکنِ کاملِ تاریخچه</b> ⇒ فقط <b>حسابِ کاربری</b> لازم است و آن هم فقط باید <b>عضوِ کانال</b> باشد
+(ادمین‌بودن <b>لازم نیست</b>)؛ برای کانالِ <b>عمومی</b> حتی عضویت هم لازم نیست.
+• <b>ربات</b> برای اسکن لازم نیست ادمین باشد. ادمین‌بودنِ ربات سه چیز می‌دهد: دکمهٔ
+«➕ ادمین‌کردنِ ربات»، خواندنِ نامِ کانال از خودِ تلگرام، و فورواردِ نتیجه با خودِ ربات
+(اگر ربات نباشد، فوروارد با حسابِ کاربری انجام می‌شود).
+• اگر نه ربات ادمین باشد و نه حسابِ کاربری دسترسی داشته باشد، هیچ راهی برای خواندنِ
+تاریخچهٔ کانال نیست (Bot API چنین امکانی ندارد) — دو راه‌حل: ربات را ادمین کنید + حساب را
+عضو کنید، یا پست‌های قدیمی را در یک <b>کانالِ آرشیو</b> فوروارد کنید و همان را اسکن کنیم.
+• 📡 <b>نامِ کانال:</b> در فهرست همیشه نام دیده می‌شود. اگر نام خوانده نشد، از کارتِ کانال
+«✏️ نامِ کانال را دستی بگذار» را بزنید یا یک <b>پستِ همان کانال</b> را برایم فوروارد کنید.
+• دکمهٔ «🩺 دسترسی‌های لازم» در کارتِ هر کانال، وضعیتِ واقعی را نشان می‌دهد.
+
+🩺 <b>چه دسترسی‌ای لازم است؟</b> (پاسخِ کوتاه: «اکانت لازم نیست ادمین باشد»)
+• <b>اسکنِ کاملِ تاریخچه</b> ⇒ فقط <b>حسابِ کاربری</b> لازم است و آن هم فقط باید <b>عضوِ کانال</b> باشد
+(ادمین‌بودن <b>لازم نیست</b>)؛ برای کانالِ <b>عمومی</b> حتی عضویت هم لازم نیست.
+• <b>ربات</b> برای اسکن لازم نیست ادمین باشد. ادمین‌بودنِ ربات سه چیز می‌دهد: دکمهٔ
+«➕ ادمین‌کردنِ ربات»، خواندنِ نامِ کانال از خودِ تلگرام، و فورواردِ نتیجه با خودِ ربات
+(اگر ربات نباشد، فوروارد با حسابِ کاربری انجام می‌شود).
+• اگر نه ربات ادمین باشد و نه حسابِ کاربری دسترسی داشته باشد، هیچ راهی برای خواندنِ
+تاریخچهٔ کانال نیست (Bot API چنین امکانی ندارد) — دو راه‌حل: ربات را ادمین کنید + حساب را
+عضو کنید، یا پست‌های قدیمی را در یک <b>کانالِ آرشیو</b> فوروارد کنید و همان را اسکن کنیم.
+• 📡 <b>نامِ کانال:</b> در فهرست همیشه نام دیده می‌شود. اگر نام خوانده نشد، از کارتِ کانال
+«✏️ نامِ کانال را دستی بگذار» را بزنید یا یک <b>پستِ همان کانال</b> را برایم فوروارد کنید.
+• دکمهٔ «🩺 دسترسی‌های لازم» در کارتِ هر کانال، وضعیتِ واقعی را نشان می‌دهد.
+
 👥 <b>ادمین‌های ربات:</b> مالک می‌تواند چند نفر را ادمین کند تا با ربات کار کنند
 (اسکن، دیدنِ نتیجه، فوروارد). «👥 ادمین‌های ربات» ← «➕ افزودنِ ادمین» و فرستادنِ <b>شناسهٔ عددی</b>
 یا یک <b>پیامِ فورواردشده از آن شخص</b>؛ دستورِ سریع: <code>/addadmin 123456789</code> ·
@@ -381,6 +407,11 @@ class BotApp:
         if fwd and (not text or text.startswith("/")):
             await self._add_channel_from_forward(chat, fwd)
             return
+        # هر پستِ فورواردشدهٔ دیگری (با متن یا بدونِ متن): اگر آن کانال را داریم و بی‌نام است،
+        # همین‌جا نامش را از دلِ پیام برمی‌داریم ⇒ رفعِ «بدون نام» بدونِ دکمه‌زدن.
+        if fwd and not self.pending.get(chat):
+            if await self._learn_title_from_forward(chat, fwd):
+                return
         # حالتِ انتظار برای مقدار (افزودنِ کانال/تنظیمات/ورود)
         p = self.pending.get(chat)
         if p and text and not text.startswith("/"):
@@ -389,6 +420,9 @@ class BotApp:
                 return
             if p["kind"] == "setting":
                 await self._apply_setting(chat, p["key"], text)
+                return
+            if p["kind"] == "chan_title":
+                await self._set_channel_name(chat, int(p.get("cid") or 0), text)
                 return
             if p["kind"].startswith("login_"):
                 await self._login_step(chat, p, text, m)
@@ -522,27 +556,9 @@ class BotApp:
                     continue
             tries[tg_id] = now
             attempts += 1
-            title = username = ""
-            if getattr(self.user, "ready", False):
-                try:
-                    info = await self.user.resolve(tg_id) or {}
-                    title = str(info.get("title") or "")
-                    username = str(info.get("username") or "")
-                except Exception as e:
-                    log.debug("resolve برای نامِ کانال ناموفق (%s): %s", tg_id, e)
-            if not title:
-                try:
-                    info = await self.api.get_chat(tg_id)
-                    title = str(info.get("title") or "")
-                    username = username or str(info.get("username") or "")
-                except Exception as e:
-                    log.debug("getChat برای نامِ کانال ناموفق (%s): %s", tg_id, e)
-            if title or username:
-                self.db.set_channel_title(int(c["id"]), title, username)
-                try:
-                    self.user.set_hint(tg_id, username=username, title=title)
-                except Exception:
-                    pass
+            got = await self._learn_title(tg_id, str(c.get("username") or ""), "")
+            if got["title"] or got["username"]:
+                self.db.set_channel_title(int(c["id"]), got["title"], got["username"])
                 fixed += 1
         return fixed
 
@@ -570,7 +586,8 @@ class BotApp:
                                "c:%d" % int(c["id"]))])
         rows.append([R.btn("➕ افزودنِ کانال", "ch:add"), R.btn("🔍 اسکنِ همه", "scan:all")])
         if any(R.title_unknown(c) for c in chans):
-            rows.append([R.btn("🔄 تلاشِ دوباره برای نامِ کانال‌ها", "ch:fix")])
+            rows.append([R.btn("🔄 تلاشِ دوباره برای نامِ کانال‌ها", "ch:fix"),
+                         R.btn("✏️ نامِ دستی", "name:%d" % int([c for c in chans if R.title_unknown(c)][0]["id"]))])
         rows.append([R.btn("🏠 منوی اصلی", "home")])
         extra = ("\n<i>✨ نامِ %d کانال از تلگرام تازه شد.</i>" % fixed) if fixed else ""
         await self.api.send_message(chat, self._channels_text(chans) + extra, kb=R.kb(rows))
@@ -584,14 +601,88 @@ class BotApp:
             st = "🆕 اسکن‌نشده" if not last else {
                 "done": "✅ اسکن‌شده", "canceled": "⏹ کنسل‌شده", "error": "⚠️ خطا",
                 "running": "⏳ در حالِ اسکن"}.get(str(last.get("status")), "✅ اسکن‌شده")
-            warn = "" if self.db.kv_get("botadmin:%d" % cid) else " <i>(ادمین‌بودن تأیید نشده)</i>"
+            # «ربات ادمین نیست» مانعِ اسکن نیست (اسکن با حسابِ کاربری انجام می‌شود) ⇒ لحن آرام
+            warn = "" if self.db.kv_get("botadmin:%d" % cid) else \
+                " <i>(ربات ادمین نیست — برای اسکن لازم نیست)</i>"
             lines.append("• <b>%s</b> — %s · %s فایل%s" % (
                 esc(R.channel_title(c)), st, "{:,}".format(self.db.count_files(cid)), warn))
             if R.title_unknown(c):
-                lines.append("   <i>نامش از تلگرام خوانده نشد؛ «🔄 تلاشِ دوباره» را بزنید یا کانال را "
-                             "دوباره با لینک/یوزرنیم اضافه کنید.</i>")
+                lines.append("   <i>نامش خوانده نشد: یک <b>پستِ همین کانال</b> را برایم فوروارد کنید "
+                             "یا ⌨️ «✏️ نامِ کانال» را از کارتِ کانال بزنید.</i>")
         lines += ["", "<i>روی هر کانال بزنید تا اسکن کنید و نتیجه را ببینید.</i>"]
         return "\n".join(lines)
+
+    async def _access_check(self, cid: int, chat: int, *, edit: Optional[int] = None) -> None:
+        """🩺 پاسخِ صریح به «چه دسترسی‌ای لازم است؟» برای همین کانال (با یک نگاهِ زنده)."""
+        c = self.db.get_channel(cid) or {}
+        tg_id = int(c.get("tg_id") or 0)
+        bot_state = await self._bot_membership(tg_id)
+        bot_line = {"admin": "✅ ادمینِ کانال است",
+                    "member": "🟡 عضو است (ادمین نیست)",
+                    "out": "⛔️ عضوِ کانال نیست",
+                    "unknown": "❔ قابلِ بررسی نبود"}[bot_state]
+        user_line = "⛔️ وصل نیست (با «🔑 اتصالِ حسابِ کاربری» وصلش کنید)"
+        user_ok = False
+        if getattr(self.user, "ready", False):
+            try:
+                info = await self.user.probe(tg_id) if tg_id else {}
+                total = int((info or {}).get("total") or 0)
+                last = int((info or {}).get("last_id") or 0)
+                user_ok = bool(total or last)
+                user_line = ("✅ تاریخچه خوانده می‌شود (%s پیام)" % "{:,}".format(total)) if user_ok else \
+                    "🟡 چیزی خوانده نشد (یا کانال خالی است یا حساب دسترسی/عضویت ندارد)"
+            except Exception as e:
+                user_line = "⚠️ خطا در بررسی: <code>%s</code>" % esc(e)
+        lines = ["🩺 <b>چه دسترسی‌ای لازم است؟</b> — %s" % esc(R.channel_title(c)), "",
+                 "🤖 <b>ربات</b>: %s" % bot_line,
+                 "👤 <b>حسابِ کاربری</b>: %s" % user_line, ""]
+        if user_ok:
+            lines += ["✅ <b>وضعیت خوب است.</b> اسکنِ کامل و فورواردِ نتیجه کار می‌کند.",
+                      "<i>ربات برای «اسکن» لازم نیست ادمین باشد؛ اسکن با حسابِ کاربری انجام می‌شود "
+                      "و فوروارد هم اگر ربات نتواند، با حسابِ کاربری انجام می‌شود.</i>"]
+        elif bot_state in ("admin", "member"):
+            lines += ["⚠️ اسکنِ کاملِ تاریخچه کار <b>نمی‌کند</b>، چون Bot API اصلاً «تاریخچهٔ کانال» ندارد.",
+                      "یکی از این دو کار را بکنید:",
+                      "① حسابِ کاربری را در کانال <b>عضو</b> کنید (لازم نیست ادمین باشد!) — برای کانالِ "
+                      "<b>عمومی</b> حتی عضو‌شدن هم لازم نیست.",
+                      "② یا پست‌های قدیمی را در یک کانالِ آرشیو فوروارد کنید و همان را اسکن کنیم."]
+        else:
+            lines += ["⚠️ نه ربات و نه حسابِ کاربری به این کانال دسترسی ندارند.",
+                      "• ربات را ادمین کنید (دکمهٔ پایین) ⇒ نامِ خودکار + فوروارد با ربات.",
+                      "• و/یا حسابِ کاربری را <b>عضو</b> کانال کنید ⇒ اسکنِ کاملِ تاریخچه.",
+                      "<i>حسابِ کاربری لازم نیست ادمین باشد؛ فقط عضویت کافی است.</i>"]
+        if R.title_unknown(c):
+            lines += ["", "✏️ نامِ این کانال را هم دستی بگذارید یا یک پستِ کانال را برایم فوروارد کنید."]
+        rows = [[R.btn("➕ ادمین‌کردنِ ربات", "adm:%d" % cid)]] if bot_state != "admin" else []
+        if R.title_unknown(c):
+            rows.append([R.btn("✏️ نامِ کانال را دستی بگذار", "name:%d" % cid)])
+        rows.append([R.btn("🔍 اسکن کامل", "scan:full:%d" % cid)])
+        rows.append([R.btn("⬅️ کانال", "c:%d" % cid)])
+        txt = "\n".join(lines)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+    async def _ask_channel_name(self, chat: int, cid: int) -> None:
+        self.pending[chat] = {"kind": "chan_title", "cid": int(cid)}
+        c = self.db.get_channel(cid) or {}
+        await self.api.send_message(
+            chat, "✏️ <b>نامِ کانال</b> — «%s»\n\nنامی که می‌خواهید در فهرست دیده شود را "
+                  "بفرستید (فقط برای نمایش در ربات؛ چیزی در تلگرام عوض نمی‌شود)." % esc(R.channel_title(c)),
+            kb=R.kb([[R.btn("⬅️ انصراف", "c:%d" % int(cid))]]))
+
+    async def _set_channel_name(self, chat: int, cid: int, name: str) -> None:
+        self.pending.pop(chat, None)
+        name = " ".join(str(name or "").split())[:64]
+        if not name:
+            await self.api.send_message(chat, "❌ نامِ خالی قبول نیست.")
+            return
+        self.db.set_channel_title(int(cid), name)
+        c = self.db.get_channel(cid) or {}
+        await self.api.send_message(
+            chat, "✅ نامِ کانال ذخیره شد: <b>%s</b>" % esc(R.channel_title(c)),
+            kb=R.kb([[R.btn("📡 کانال", "c:%d" % int(cid))], [R.btn("📡 کانال‌ها", "ch:list")]]))
 
     async def _channel_view(self, chat: int, cid: int, edit: Optional[int] = None) -> None:
         c = self.db.get_channel(cid)
@@ -606,9 +697,11 @@ class BotApp:
                 {"done": "✅ کامل", "canceled": "⏹ کنسل‌شده", "error": "⚠️ خطا", "running": "⏳"}.get(
                     last.get("status"), last.get("status")),
                 "{:,}".format(int(last.get("files_found") or 0)), "{:,}".format(int(last.get("groups_found") or 0)))
-        text = ("📡 <b>%s</b>\n🔗 %s\n\n"
+        name_note = ("\n<i>⚠️ نامِ این کانال از تلگرام خوانده نشد؛ «✏️ نامِ کانال» را بزنید یا یک "
+                     "پست از همین کانال را برایم فوروارد کنید.</i>") if R.title_unknown(c) else ""
+        text = ("📡 <b>%s</b>\n🔗 %s%s\n\n"
                 "🎬 فایل‌های ایندکس‌شده: <b>%s</b>\n📊 آخرین اسکن: %s") % (
-            esc(R.channel_title(c)), esc("@" + (c.get("username") or "—")),
+            esc(R.channel_title(c)), esc("@" + (c.get("username") or "—")), name_note,
             "{:,}".format(files), state)
         rows = [[R.btn("🔍 اسکن کامل (تاریخچهٔ کامل)", "scan:full:%d" % cid)],
                 [R.btn("🔄 ادامهٔ اسکن (فقط جدیدها)", "scan:cont:%d" % cid)]]
@@ -622,7 +715,11 @@ class BotApp:
                          R.btn("🔁 گروه‌های تکراری", "l:%d:%d:all:0" % (int(last["id"]), cid))])
         if self.scan and not self.scan.get("done"):
             rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
-        rows.append([R.btn("➕ ادمین‌کردنِ ربات در این کانال", "adm:%d" % cid)])
+        if R.title_unknown(c):
+            rows.append([R.btn("✏️ نامِ کانال را دستی بگذار (یا یک پستش را فوروارد کنید)",
+                               "name:%d" % cid)])
+        rows.append([R.btn("➕ ادمین‌کردنِ ربات در این کانال", "adm:%d" % cid),
+                     R.btn("🩺 دسترسی‌های لازم", "chk:%d" % cid)])
         rows.append([R.btn("🗑 حذف از فهرست", "ch:del:%d" % cid), R.btn("⬅️ کانال‌ها", "ch:list")])
         if edit:
             await self.api.edit_message_text(chat, edit, text, kb=R.kb(rows))
@@ -641,6 +738,32 @@ class BotApp:
             "• یا یک <b>پستِ فورواردشده</b> از همان کانال\n\n"
             "⚠️ ربات باید در کانال <b>ادمین</b> باشد (برای فوروارد). برای دیدنِ <b>کلِ تاریخچه</b> هم «🔑 اتصالِ حسابِ کاربری» را انجام دهید.",
             kb=R.kb([[R.btn("⬅️ کانال‌ها", "ch:list")]]))
+
+    async def _learn_title_from_forward(self, chat: int, fwd: Dict[str, Any]) -> bool:
+        """اگر کانالِ فورواردشده را داریم و نامش نامعلوم است، از خودِ پیام نامش را بگیر.
+
+        خروجی `True` یعنی «نام تازه ثبت شد» ⇒ پیامِ تأیید فرستاده شده و نیازی به ادامهٔ
+        پردازش این پیام (منوی اصلی) نیست.
+        """
+        tg_id = int(fwd.get("id") or 0)
+        if not tg_id:
+            return False
+        c = self.db.get_channel_by_tg(tg_id)
+        if not c or not R.title_unknown(c):
+            return False
+        title = str(fwd.get("title") or "").strip()
+        username = str(fwd.get("username") or "").strip().lstrip("@")
+        if not title and not username:
+            return False
+        got = await self._learn_title(tg_id, username, title)
+        if got["title"] or got["username"]:
+            self.db.set_channel_title(int(c["id"]), got["title"], got["username"])
+            await self.api.send_message(
+                chat, "✏️ نامِ کانال از پستِ فورواردشده خوانده شد: <b>%s</b>" % esc(R.channel_title(
+                    self.db.get_channel(int(c["id"])) or {})),
+                kb=R.kb([[R.btn("📡 کانال", "c:%d" % int(c["id"]))], [R.btn("📡 کانال‌ها", "ch:list")]]))
+            return True
+        return False
 
     async def _add_channel_from_forward(self, chat: int, fwd: Dict[str, Any]) -> None:
         tg_id = int(fwd.get("id") or 0)
@@ -680,47 +803,104 @@ class BotApp:
             return
         await self._register_channel(chat, tg_id, username, title)
 
-    async def _register_channel(self, chat: int, tg_id: int, username: str, title: str) -> None:
-        # بررسیِ ادمین‌بودنِ ربات (اگر ممکن باشد) — فقط برای اطلاع، مانعِ افزودن نمی‌شود
-        bot_admin = None
+    async def _learn_title(self, tg_id: int, username: str = "", title: str = "",
+                           *, kind: str = "") -> Dict[str, str]:
+        """نردبانِ گرفتنِ نامِ کانال: ① فوروارد ② حسابِ کاربری ③ Bot API ④ probe.
+
+        هر پله که جواب بدهد کافی است؛ خروجی همیشه نام/یوزرنیم/نوعِ بهترین چیزی است که
+        پیدا شد. **هیچ‌وقت** نامِ پیدا‌شده را با نامِ خالی خراب نمی‌کند.
+        """
+        out = {"title": str(title or "").strip(), "username": str(username or "").strip().lstrip("@"),
+               "kind": kind or "channel"}
+        _tg = str(tg_id or "").strip()
+        if out["title"] and out["title"].lstrip("-").isdigit() and \
+                out["title"] in (_tg, _tg.lstrip("-"), "-" + _tg):
+            out["title"] = ""            # عنوانی که خودِ شناسه است، «نام» حساب نمی‌شود
+        if out["title"] and out["username"]:
+            return out
+        # ② حسابِ کاربری (کافی است اکانت **عضو** باشد؛ برای کانالِ عمومی نیاز به عضویت هم نیست)
+        if getattr(self.user, "ready", False):
+            try:
+                info = await self.user.resolve(tg_id or ("@" + out["username"])) or {}
+                out["title"] = out["title"] or str(info.get("title") or "").strip()
+                out["username"] = out["username"] or str(info.get("username") or "").strip().lstrip("@")
+                out["kind"] = str(info.get("kind") or out["kind"])
+                try:
+                    self.user.set_hint(int(info.get("tg_id") or tg_id or 0),
+                                       username=out["username"], title=out["title"])
+                    self._remember_peer_hashes()
+                except Exception:
+                    pass
+            except Exception as e:
+                log.debug("resolve برای نامِ %s ناموفق: %s", tg_id, e)
+        # ③ Bot API (اگر ربات در کانال عضو/ادمین باشد)
+        if tg_id and (not out["title"] or not out["username"]):
+            try:
+                info = await self.api.get_chat(tg_id)
+                out["title"] = out["title"] or str(info.get("title") or "").strip()
+                out["username"] = out["username"] or str(info.get("username") or "").strip().lstrip("@")
+            except Exception as e:
+                log.debug("getChat برای %s ناموفق: %s", tg_id, e)
+        # ④ probe (عنوان از GetHistory/entity)
+        if tg_id and not out["title"] and getattr(self.user, "ready", False):
+            try:
+                info = await self.user.probe(tg_id) or {}
+                out["title"] = str(info.get("title") or "").strip()
+            except Exception:
+                pass
+        if tg_id:
+            try:
+                self.user.set_hint(int(tg_id), username=out["username"], title=out["title"])
+            except Exception:
+                pass
+        return out
+
+    async def _bot_membership(self, tg_id: int) -> str:
+        """وضعیتِ ربات در کانال: `admin` · `member` · `out` (عضو/ادمین نیست) · `unknown`."""
         try:
             me = await self.api.get_me()
             st = await self.api.get_chat_member(tg_id, int(me.get("id") or 0))
-            bot_admin = str(st.get("status") or "") in ("administrator", "creator")
+            status = str(st.get("status") or "")
+            if status in ("administrator", "creator"):
+                return "admin"
+            if status in ("member", "restricted"):
+                return "member"
+            return "out"
         except Exception:
-            bot_admin = None
+            return "unknown"
+
+    async def _register_channel(self, chat: int, tg_id: int, username: str, title: str) -> None:
+        bot_state = await self._bot_membership(tg_id)          # فقط برای اطلاع؛ مانعِ افزودن نیست
+        prev = self.db.get_channel_by_tg(tg_id) or {}
         kind = "channel"
-        # اگر حسابِ کاربری وصل است، عنوان/یوزرنیمِ دقیق + نوع را از آن بگیر
-        if (not title or not username) and getattr(self.user, "ready", False):
-            try:
-                info = await self.user.resolve(tg_id if tg_id else ("@" + username))
-                if info:
-                    title = info.get("title") or title
-                    username = info.get("username") or username
-                    kind = info.get("kind") or kind
-                    # یوزرنیمِ کانال حفظ می‌شود (اگر بعداً شناسهٔ خصوصی حل نشد استفاده می‌شود)
-                    self.user.set_hint(int(info.get("tg_id") or tg_id or 0),
-                                       username=username, title=title)
-                    self._remember_peer_hashes()
-            except Exception:
-                pass
-        elif tg_id:
-            self.user.set_hint(int(tg_id), username=username, title=title)
-        cid = self.db.add_channel(tg_id, title or "", username, kind)
+        got = await self._learn_title(tg_id, username, title, kind=kind)
+        # نامِ موجود در دیتابیس هرگز با نامِ خالی پاک نمی‌شود
+        title = got["title"] or str(prev.get("title") or "").strip()
+        username = got["username"] or str(prev.get("username") or "").strip()
+        kind = got["kind"] or kind
+        cid = self.db.add_channel(tg_id, title, username, kind)
         self.pending.pop(chat, None)
         c = self.db.get_channel(cid) or {}
+        if bot_state in ("admin", "member"):
+            self.db.kv_set("botadmin:%d" % cid, 1)
         warn = ""
-        if bot_admin is not False:
-            self.db.kv_set("botadmin:%d" % cid, 1)      # ادمین‌بودنِ تأییدشده
-        if bot_admin is False:
-            warn = ("\n\n⚠️ ربات در «%s» <b>ادمین نیست</b> — برای دیدنِ همهٔ پست‌ها و فوروارد لازم است. "
-                    "با دکمهٔ پایین یک‌ضربه‌ای انجامش دهید." % esc(R.channel_title(c)))
+        if bot_state == "out":
+            warn = ("\n\n⚠️ ربات <b>عضوِ</b> «%s» نیست. برای اسکن لازم نیست ربات ادمین باشد "
+                    "(اسکن با حسابِ کاربری انجام می‌شود)، ولی «نامِ خودکار» و «فوروارد با ربات» "
+                    "کار می‌کند اگر ربات را ادمین کنید." % esc(R.channel_title(c)))
         rows = [[R.btn("🔍 اسکن کامل", "scan:full:%d" % cid)]]
-        if bot_admin is False:
+        if bot_state in ("out", "unknown"):
             rows.insert(0, [R.btn("➕ ادمین‌کردنِ ربات در «%s»" % R.channel_title(c)[:28], "adm:%d" % cid)])
+        if R.title_unknown(c):
+            rows.insert(0, [R.btn("✏️ نامِ کانال را دستی بگذار", "name:%d" % cid)])
+        rows.append([R.btn("🩺 چه دسترسی‌ای لازم است؟", "chk:%d" % cid)])
         rows.append([R.btn("📡 کانال‌ها", "ch:list")])
         await self.api.send_message(
-            chat, "✅ کانال ذخیره شد: <b>%s</b>%s\n\nحالا اسکن را شروع کنیم؟" % (esc(R.channel_title(c)), warn),
+            chat, "✅ کانال ذخیره شد: <b>%s</b>%s\n\n%s" % (
+                esc(R.channel_title(c)), warn,
+                "حالا اسکن را شروع کنیم؟" if not R.title_unknown(c) else
+                "نامش را از تلگرام نخواندم — با دکمهٔ «✏️ نامِ کانال» خودتان بگذارید، یا یک "
+                "<b>پستِ همین کانال</b> را برایم فوروارد کنید تا نامش را بردارم."),
             kb=R.kb(rows))
 
     def _remember_peer_hashes(self) -> None:
@@ -1759,10 +1939,18 @@ class BotApp:
                             kb=R.kb([[R.btn("👥 ادمین‌ها", "own:menu")]]))
                     else:
                         await self.api.send_message(chat, "❌ این کاربر ادمین نبود.")
+            elif op == "name":
+                await self._ask_channel_name(chat, int(parts[1]))
+            elif op == "chk":
+                await self._access_check(int(parts[1]), chat, edit=mid)
             elif op == "ch":
                 sub = parts[1] if len(parts) > 1 else "list"
                 if sub == "list":
                     await self._channels_menu(chat)
+                elif sub == "name":
+                    await self._ask_channel_name(chat, int(parts[2]))
+                elif sub == "chk":
+                    await self._access_check(int(parts[2]), chat, edit=mid)
                 elif sub == "add":
                     await self._ask_add_channel(chat)
                 elif sub == "fix":
