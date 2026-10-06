@@ -127,8 +127,18 @@ class Scanner:
         tg_id = int(channel["tg_id"])
         from_db = self.db.max_msg_id(cid)
         since = 0 if full else from_db
+        # ۲ نکتهٔ مهمِ اسکنِ ادامه‌ای (باگِ گزارش‌شده):
+        #   ① پستِ قدیمی می‌تواند **ویرایش** شود و فایلش عوض شود. اگر فقط از `max_msg_id` به بعد
+        #      بخوانیم، آن پیام هرگز بازخوانی نمی‌شود و رکورد/هشِ کهنه در دیتابیس می‌ماند.
+        #      پس نوکِ کانال به اندازهٔ `incr_tail` پیام عقب‌تر بازخوانی می‌شود (پیش‌فرض ۲۰۰).
+        #   ② فایل‌هایی که محتوایشان عوض شده (db.upsert_files) در `self.rehash_ids` جمع می‌شوند
+        #      تا حتی اگر در نامزدهای معمول نبودند، هششان از نو حساب شود.
+        tail = 0 if full else max(0, int(cfg.get("incr_tail") or 0))
+        iter_from = max(0, from_db - tail)
+        self.rehash_ids = set()
         params = {"full": bool(full), "hash_mode": cfg.get("hash_mode"), "media_kinds": cfg.get("media_kinds"),
-                  "since": since, "th_name_ratio": cfg.get("th_name_ratio"),
+                  "since": since, "iter_from": iter_from, "incr_tail": tail,
+                  "th_name_ratio": cfg.get("th_name_ratio"),
                   "th_name_jaccard": cfg.get("th_name_jaccard"), "th_cap_ratio": cfg.get("th_cap_ratio"),
                   "th_cap_jaccard": cfg.get("th_cap_jaccard"), "size_tol_pct": cfg.get("size_tol_pct"),
                   "dur_tol_s": cfg.get("dur_tol_s")}
@@ -143,9 +153,9 @@ class Scanner:
             total, last_id = await self._probe(tg_id)
             self.progress.total = total
             self.progress.top_id = last_id
-            self.progress.last_msg_id = int(since or 0)
+            self.progress.last_msg_id = int(iter_from or 0)
             await self._emit(force=True)
-            async for row in self.user.iter_videos(tg_id, min_id=since, media_kinds=str(cfg.get("media_kinds") or "video"),
+            async for row in self.user.iter_videos(tg_id, min_id=iter_from, media_kinds=str(cfg.get("media_kinds") or "video"),
                                                   wait_time=float(cfg.get("scan_wait_time", 0.35) or 0)):
                 self._check()
                 row = dict(row)
@@ -156,7 +166,7 @@ class Scanner:
                 found += 1
                 seen += 1
                 if len(buf) >= 200:
-                    self.db.add_files(buf)
+                    self.rehash_ids.update(self.db.upsert_files(buf).get("changed") or [])
                     buf = []
                 self.progress.seen = seen
                 self.progress.files = found
@@ -168,7 +178,7 @@ class Scanner:
                                     phase="index", max_id=self.progress.last_msg_id)
                 await self._emit()
             if buf:
-                self.db.add_files(buf)
+                self.rehash_ids.update(self.db.upsert_files(buf).get("changed") or [])
             self.progress.pct = 70.0
             self.progress.phase = "match"
             self.progress.note = "تحلیلِ نامزدها…"
@@ -181,6 +191,14 @@ class Scanner:
             if str(cfg.get("hash_mode") or "candidates") != "off" and files:
                 hstats: Dict[str, int] = {}
                 ids = M.hash_candidate_ids(files, cfg, stats=hstats)
+                if self.rehash_ids:
+                    # فایل‌هایی که همین حالا محتوایشان عوض شده (پستِ ویرایش‌شده) — هشِ نو لازم دارند
+                    fresh = {int(f["id"]) for f in files if int(f["id"]) in set(self.rehash_ids)}
+                    if fresh:
+                        ids = sorted(set(int(x) for x in ids) | fresh)
+                        res.notes.append(
+                            "♻️ %s فایل در کانال تغییر کرده بود (پستِ ویرایش/جابه‌جاشده) ⇒ هششان از نو "
+                            "حساب شد تا نتیجهٔ تکراری بر پایهٔ دادهٔ کهنه نباشد." % len(fresh))
                 if hstats.get("hash_capped"):
                     res.notes.append(
                         "⚠️ %s فایل به‌خاطرِ سقفِ هش (۴۰۰۰) هش نشد؛ حالتِ هش را روی «candidates» "
@@ -210,9 +228,9 @@ class Scanner:
             dropped = int(stats.get("size_pairs_dropped", 0)) + int(stats.get("duration_pairs_dropped", 0))
             if dropped:
                 res.notes.append(
-                    "⚠️ حدوداً %s جفت‌کاندید به‌خاطرِ سقفِ «size_pair_cap» بررسی نشدند (کانالِ حجیم با "
-                    "حجم/زمانِ خیلی مشابه). هم‌حجم‌های دقیق و هم‌زمان‌های دقیق همیشه بررسی می‌شوند، "
-                    "ولی اگر نگرانید این عدد را در تنظیمات بالا ببرید." % dropped)
+                    "⚠️ حدوداً %s جفت‌کاندید به‌خاطرِ سقفِ «size_pair_cap»/«duration_pair_cap» بررسی "
+                    "نشدند (کانالِ حجیم با حجم/زمانِ خیلی مشابه). هم‌حجم‌های دقیق و هم‌زمان‌های دقیق "
+                    "همیشه بررسی می‌شوند، ولی اگر نگرانید این عدد را در تنظیمات بالا ببرید." % dropped)
                 log.warning("نامزدسازی: %s جفت بررسی‌نشده (stats=%s)", dropped, stats)
             res.status = "done"
             res.seconds = round(time.time() - t0, 1)
