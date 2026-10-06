@@ -64,7 +64,7 @@ def test_full_scan_indexes_and_groups(tmp_path):
 def test_hashes_only_candidates(tmp_path):
     db, user, chan = setup(tmp_path)
     sc = Scanner(db, user, lambda: CFG)
-    res = run(sc.run(chan, full=True))
+    run(sc.run(chan, full=True))
     hashed = [f for f in db.files_of_channel(chan["id"]) if f["content_hash"]]
     assert 0 < len(hashed) < 13        # همه هش نمی‌شوند؛ فقط نامزدها
     # فایلِ یگانه (۱۵۰) هش نمی‌شود
