@@ -55,9 +55,11 @@ class FakeApi:
 
     async def send_message(self, chat_id: int, text: str, *, kb: Optional[dict] = None,
                            parse_mode: str = "HTML", preview: bool = False, silent: bool = False,
-                           reply_to: Optional[int] = None) -> Dict[str, Any]:
+                           reply_to: Optional[int] = None,
+                           kb_extra: Optional[dict] = None) -> Dict[str, Any]:
         self._mid += 1
-        rec = {"message_id": self._mid, "chat_id": int(chat_id), "text": text, "kb": kb, "parse_mode": parse_mode}
+        rec = {"message_id": self._mid, "chat_id": int(chat_id), "text": text,
+               "kb": kb if kb is not None else kb_extra, "parse_mode": parse_mode}
         self._mid_seq[self._mid] = self._mid
         self.sent.append(rec)
         self._log("sendMessage", chat_id=chat_id, text=text, reply_markup=kb)
@@ -161,8 +163,16 @@ class FakeUser:
         self.forwarded: List[Dict[str, Any]] = []
         self.last_error = ""
         self.probed: List[int] = []
+        self.qr_times_out: bool = False          # برای تستِ انقضای QR
+        self.qr_refresh_limit: int = 99
+        self.admin_fails: bool = False
+        self._admins: Dict[int, set] = {}
         self.code_requests: List[str] = []      # شماره‌هایی که برایشان کد خواسته شده
         self.sign_in_calls: List[str] = []      # کدهایی که برای ورود تلاش شده
+        self.qr_starts: int = 0
+        self.qr_recreates: int = 0
+        self.admin_calls: List[Dict[str, Any]] = []   # ادمین‌کردن‌های انجام‌شده
+        self.admin_rights: Dict[str, Any] = {}
 
     # ── وضعیت ──
     @property
@@ -207,6 +217,39 @@ class FakeUser:
             self.session_string = "FAKE_SESSION"
             return {"ok": True, "error": "", "kind": "ok"}
         return {"ok": False, "error": "PASSWORD_HASH_INVALID", "kind": "password"}
+
+    # ── ورود با QR ──
+    async def qr_login_start(self) -> Dict[str, Any]:
+        self.qr_starts += 1
+        return {"url": "tg://login?token=FAKEQR%d" % self.qr_starts}
+
+    async def qr_login_wait(self, timeout: float = 25.0) -> Dict[str, Any]:
+        if getattr(self, "_qr_confirmed", False):
+            self._ready = True
+            self.session_string = "FAKE_SESSION"
+            return {"ok": True, "me": self.me}
+        if self.qr_times_out:
+            return {"ok": False, "expired": True, "error": "timeout"}
+        return {"ok": False, "error": "other"}
+
+    async def qr_login_recreate(self) -> str:
+        self.qr_recreates += 1
+        if self.qr_recreates >= self.qr_refresh_limit:
+            return ""
+        return "tg://login?token=FAKEQR%d" % (self.qr_starts + self.qr_recreates)
+
+    # ── ادمینِ کانال ──
+    async def add_bot_admin(self, tg_id: int, bot_id: int, *, can_post: bool = True,
+                            can_edit: bool = True) -> Dict[str, Any]:
+        self.admin_calls.append({"tg_id": int(tg_id), "bot_id": int(bot_id)})
+        self.admin_rights = {"post_messages": bool(can_post), "edit_messages": bool(can_edit)}
+        if self.admin_fails:
+            return {"ok": False, "error": "CHAT_ADMIN_REQUIRED"}
+        self._admins.setdefault(int(tg_id), set()).add(int(bot_id))
+        return {"ok": True, "error": ""}
+
+    async def is_bot_admin(self, tg_id: int, bot_id: int) -> bool:
+        return int(bot_id) in self._admins.get(int(tg_id), set())
 
     async def resolve(self, ref: Any) -> Optional[Dict[str, Any]]:
         key = int(ref) if str(ref).lstrip("-").isdigit() else ref
