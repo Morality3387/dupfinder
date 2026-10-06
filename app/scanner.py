@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import matching as M
@@ -67,6 +67,7 @@ class ScanResult:
     error: str = ""
     canceled: bool = False
     seconds: float = 0.0
+    notes: List[str] = field(default_factory=list)   # هشدارهای صادقانه (مثلِ سقفِ نامزدها)
 
 
 class Canceled(Exception):
@@ -159,6 +160,8 @@ class Scanner:
                     buf = []
                 self.progress.seen = seen
                 self.progress.files = found
+                self.progress.note = "شناسهٔ پیام: #%d از #%d" % (
+                    self.progress.last_msg_id, self.progress.top_id) if self.progress.top_id else ""
                 self.progress.last_msg_id = max(self.progress.last_msg_id, int(row.get("msg_id") or 0))
                 self.progress.pct = self._pct_index()
                 self.db.update_scan(self.scan_id, seen_msgs=seen, files_found=found,
@@ -176,7 +179,16 @@ class Scanner:
             res.files = len(files)
             res.found = found
             if str(cfg.get("hash_mode") or "candidates") != "off" and files:
-                ids = M.hash_candidate_ids(files, cfg)
+                hstats: Dict[str, int] = {}
+                ids = M.hash_candidate_ids(files, cfg, stats=hstats)
+                if hstats.get("hash_capped"):
+                    res.notes.append(
+                        "⚠️ %s فایل به‌خاطرِ سقفِ هش (۴۰۰۰) هش نشد؛ حالتِ هش را روی «candidates» "
+                        "بگذارید یا کانال را تکه‌تکه اسکن کنید." % int(hstats["hash_capped"]))
+                if hstats.get("name_bucket_skipped"):
+                    res.notes.append(
+                        "ℹ️ %s فایل نامِ خیلی عمومی داشتند (سبدِ نامِ بزرگ)؛ برای آن‌ها فقط سیگنال‌های "
+                        "حجم/زمان و هش بررسی شد." % int(hstats["name_bucket_skipped"]))
                 self.progress.hash_total = len(ids)
                 if ids:
                     self.progress.note = "هش‌گذاریِ نامزدها (دانلودِ جزئی)…"
@@ -191,16 +203,28 @@ class Scanner:
             self.progress.pct = max(self.progress.pct, 96.0)
             self.progress.note = "گروه‌بندیِ نهایی…"
             await self._emit(force=True)
-            clusters = M.find_clusters(files, cfg)
+            stats: Dict[str, int] = {}
+            clusters = M.find_clusters(files, cfg, stats=stats)
             self.db.replace_groups(self.scan_id, cid, clusters)
             res.groups = len(clusters)
+            dropped = int(stats.get("size_pairs_dropped", 0)) + int(stats.get("duration_pairs_dropped", 0))
+            if dropped:
+                res.notes.append(
+                    "⚠️ حدوداً %s جفت‌کاندید به‌خاطرِ سقفِ «size_pair_cap» بررسی نشدند (کانالِ حجیم با "
+                    "حجم/زمانِ خیلی مشابه). هم‌حجم‌های دقیق و هم‌زمان‌های دقیق همیشه بررسی می‌شوند، "
+                    "ولی اگر نگرانید این عدد را در تنظیمات بالا ببرید." % dropped)
+                log.warning("نامزدسازی: %s جفت بررسی‌نشده (stats=%s)", dropped, stats)
             res.status = "done"
             res.seconds = round(time.time() - t0, 1)
             self.progress.phase = "done"
             self.progress.pct = 100.0
             self.progress.note = "تمام شد"
+            # `seen_msgs` را از روی شناسه‌ها تخمین می‌زنیم (تعدادِ واقعیِ پیام‌های پیمایش‌شده)
+            seen_msgs = max(int(self.progress.seen),
+                            int(self.progress.last_msg_id) - int(self.progress.new_since or 0)) \
+                if self.progress.top_id else int(self.progress.seen)
             self.db.update_scan(self.scan_id, status="done", phase="done", finished_at=int(time.time()),
-                                total_msgs=total, seen_msgs=self.progress.seen, files_found=res.found,
+                                total_msgs=total, seen_msgs=seen_msgs, files_found=res.found,
                                 hashed=res.hashed, groups_found=res.groups)
             self.db.set_channel_scan(cid, self.scan_id, int(time.time()))
             self.db.log_action("scan_done", "channel=%s files=%d groups=%d in=%ss" % (cid, res.files, res.groups, res.seconds))
@@ -251,19 +275,22 @@ class Scanner:
         return res
 
     def _pct_index(self) -> float:
-        """درصدِ فازِ ایندکس (۰..۶۸).
+        """درصدِ فازِ ایندکس (۰..۶۸) — بر پایهٔ **شمارهٔ پیام**، نه تعدادِ ویدیوها.
 
-        اگر تعدادِ کلِ پیام‌ها معلوم باشد از آن، وگرنه از موقعیتِ شناسهٔ پیام در
-        بازهٔ [شروع … آخرین پیامِ کانال] تخمین می‌زنیم — نوارِ درصد نباید یخ بزند.
+        باگِ قبلی: درصد از `seen` (تعدادِ ویدیوهای پیداشده) تقسیم بر `total`
+        (تعدادِ کلِ پیام‌های کانال) حساب می‌شد؛ در کانالی با ۱۰۰هزار پیام و ۱۰هزار
+        ویدیو، نوار در پایانِ اسکن هم حدودِ ۷٪ می‌ماند. حالا مبنای درصد موقعیتِ
+        شناسهٔ پیام در بازهٔ [شروع … آخرین پیامِ کانال] است (یکنوا و بی‌خواب).
         """
         p = self.progress
-        if p.total and p.total > 0:
-            return min(68.0, 68.0 * float(p.seen) / float(p.total))
         top = int(p.top_id or 0)
         base = int(p.new_since or 0)
         cur = int(p.last_msg_id or 0)
         if top > base and cur > base:
             return min(68.0, 68.0 * float(cur - base) / float(top - base))
+        if p.total and p.total > 0:
+            # ناچاریم تخمین بزنیم (شناسهٔ آخرِ کانال معلوم نیست) ⇒ محافظه‌کارانه و نصفِ سهم
+            return min(68.0, 34.0 * float(p.seen) / float(p.total))
         return 1.0
 
     async def _probe(self, tg_id: int) -> Tuple[int, int]:
@@ -295,7 +322,10 @@ class Scanner:
             self._check()
             chunk = todo[i:i + batch]
             try:
-                out = await self.user.hash_batch(tg_id, chunk)
+                out = await self.user.hash_batch(
+                    tg_id, chunk,
+                    scope=str(cfg.get("hash_scope") or "sample"),
+                    full_max_bytes=int(cfg.get("hash_full_max_mb") or 0) * 1024 * 1024)
             except Exception as e:
                 log.info("hash_batch خطا: %s", e)
                 out = {}
@@ -308,7 +338,8 @@ class Scanner:
                         if int(f.get("msg_id") or 0) == int(msg_id) and int(f["id"]) in by_id:
                             self.db.set_hash(int(f["id"]), str(h), str(scope))
                             break
-            self.progress.pct = 70.0 + (25.0 * min(1.0, float(self.progress.hashed) / max(1, self.progress.hash_total or len(todo))))
+            self.progress.pct = 70.0 + (25.0 * min(
+                1.0, float(self.progress.hashed) / max(1, self.progress.hash_total or len(todo))))
             self.progress.note = "هش‌گذاری: %d از %d" % (self.progress.hashed, len(todo))
             await self._emit()
         self.progress.pct = 95.0
