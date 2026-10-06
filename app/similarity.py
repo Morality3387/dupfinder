@@ -245,12 +245,19 @@ MIN_CAPTION_LEN = 12
 
 
 def caption_similar(a: Optional[str], b: Optional[str], *, th_ratio: float = 0.80,
-                    th_jaccard: float = 0.60) -> Tuple[bool, float]:
-    """آیا دو **کپشن** تکراری/شبیه‌اند؟ کپشنِ خالی هرگز تطبیق نمی‌شود."""
+                    th_jaccard: float = 0.60, min_len: Optional[int] = None) -> Tuple[bool, float]:
+    """آیا دو **کپشن** تکراری/شبیه‌اند؟ کپشنِ خالی هرگز تطبیق نمی‌شود.
+
+    `min_len` حداقلِ طولِ کپشنِ نرمال‌شده است (پیش‌فرض ۱۲ نویسه). کپشنِ کوتاه‌تر
+    عمداً نادیده گرفته می‌شود چون «فیلم»، «کلیپ» و مانندشان بین فایل‌های نامرتبط مشترک‌اند.
+    اگر کانالِ شما کپشن‌های کوتاهِ **دقیقاً یکسان** دارد، می‌توانید `min_caption_len`
+    را در تنظیمات کمتر کنید (با آگاهی از ریسکِ مثبتِ کاذب).
+    """
     ca, cb = caption_norm(a), caption_norm(b)
     if not ca or not cb:
         return False, 0.0
-    if len(ca) < MIN_CAPTION_LEN or len(cb) < MIN_CAPTION_LEN:
+    ml = MIN_CAPTION_LEN if min_len is None else max(1, int(min_len))
+    if len(ca) < ml or len(cb) < ml:
         return False, 0.0
     if ca == cb:
         return True, 1.0
