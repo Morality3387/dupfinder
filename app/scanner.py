@@ -1,0 +1,297 @@
+"""موتورِ اسکن: ایندکسِ تاریخچهٔ کامل کانال ← نامزدها ← هش‌گذاری جزئی ← گروه‌بندی.
+
+ویژگی‌ها: نوارِ درصدِ زنده، توقف/کنسل، ادامه از نقطهٔ قطع، و **فقط خواندن**
+(هیچ پیام یا فایلی در تلگرام پاک/ویرایش نمی‌شود).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+
+from . import matching as M
+from . import similarity as S
+
+log = logging.getLogger("dup.scan")
+
+
+@dataclass
+class Progress:
+    phase: str = "index"          # index|hash|match|done|canceled|error
+    seen: int = 0                 # پیام‌های پیمایش‌شده
+    total: int = 0                # برآوردِ کلِ پیام‌ها (۰ = نامعلوم)
+    files: int = 0                # فایل‌های ویدیوییِ پیداشده
+    hashed: int = 0               # فایل‌های هش‌شده
+    hash_total: int = 0
+    pct: float = 0.0
+    note: str = ""
+    new_since: int = 0
+    last_msg_id: int = 0
+    top_id: int = 0               # آخرین شناسهٔ پیامِ کانال (از probe) — برای تخمینِ درصد
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"phase": self.phase, "seen": self.seen, "total": self.total, "files": self.files,
+                "hashed": self.hashed, "hash_total": self.hash_total, "pct": round(self.pct, 2),
+                "note": self.note}
+
+
+@dataclass
+class ScanResult:
+    scan_id: int = 0
+    channel_id: int = 0
+    status: str = "done"
+    files: int = 0                # کلِ فایل‌های ایندکس‌شدهٔ کانال
+    found: int = 0                # فایل‌هایی که در همین اسکن دیده شدند
+    hashed: int = 0
+    groups: int = 0
+    error: str = ""
+    canceled: bool = False
+    seconds: float = 0.0
+
+
+class Canceled(Exception):
+    pass
+
+
+class Scanner:
+    def __init__(self, db, user, cfg: Callable[[], Dict[str, Any]], *,
+                 on_progress: Optional[Callable[[Progress], Awaitable[None]]] = None):
+        self.db = db
+        self.user = user
+        self.cfg = cfg                    # تابعی که دیکشنریِ تنظیماتِ فعلی را می‌دهد
+        self.on_progress = on_progress
+        self._cancel = asyncio.Event()
+        self.progress = Progress()
+        self.scan_id = 0
+        self._last_emit = 0.0
+        self.running = False
+
+    # ── کنترل ──
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    @property
+    def canceled(self) -> bool:
+        return self._cancel.is_set()
+
+    def _check(self) -> None:
+        if self._cancel.is_set():
+            raise Canceled()
+
+    async def _emit(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        # ⚠️ صفر یعنی «هر بار بفرست» — پس نباید با `or` به پیش‌فرض برگردد (باگِ واقعی).
+        try:
+            interval = float(self.cfg().get("progress_interval", 2.0))
+        except (TypeError, ValueError):
+            interval = 2.0
+        if interval < 0:
+            interval = 0.0
+        if not force and (now - self._last_emit) < interval:
+            return
+        self._last_emit = now
+        if self.on_progress:
+            try:
+                await self.on_progress(self.progress)
+            except Exception as e:  # نمایشِ پیشرفت نباید اسکن را بشکند
+                log.debug("on_progress خطا: %s", e)
+
+    # ── اجرا ──
+    async def run(self, channel: Dict[str, Any], *, full: bool = False) -> ScanResult:
+        cfg = self.cfg()
+        t0 = time.time()
+        self.running = True
+        self._cancel = asyncio.Event()
+        cid = int(channel["id"])
+        tg_id = int(channel["tg_id"])
+        from_db = self.db.max_msg_id(cid)
+        since = 0 if full else from_db
+        params = {"full": bool(full), "hash_mode": cfg.get("hash_mode"), "media_kinds": cfg.get("media_kinds"),
+                  "since": since, "th_name_ratio": cfg.get("th_name_ratio"),
+                  "th_name_jaccard": cfg.get("th_name_jaccard"), "th_cap_ratio": cfg.get("th_cap_ratio"),
+                  "th_cap_jaccard": cfg.get("th_cap_jaccard"), "size_tol_pct": cfg.get("size_tol_pct"),
+                  "dur_tol_s": cfg.get("dur_tol_s")}
+        self.scan_id = self.db.create_scan(cid, params, min_id=since)
+        self.progress = Progress(phase="index", new_since=since, pct=0.0)
+        res = ScanResult(scan_id=self.scan_id, channel_id=cid)
+        buf: List[Dict[str, Any]] = []      # بافرِ درجِ فایل‌ها (بیرونِ try: در کنسل/خطا هم ذخیره می‌شود)
+        seen = 0                            # بیرونِ try تا در کنسل/خطا هم در دسترس باشند
+        found = 0
+        try:
+            # ── فازِ ۱: ایندکس ──
+            total, last_id = await self._probe(tg_id)
+            self.progress.total = total
+            self.progress.top_id = last_id
+            self.progress.last_msg_id = int(since or 0)
+            await self._emit(force=True)
+            async for row in self.user.iter_videos(tg_id, min_id=since, media_kinds=str(cfg.get("media_kinds") or "video"),
+                                                  wait_time=float(cfg.get("scan_wait_time", 0.35) or 0)):
+                self._check()
+                row = dict(row)
+                row["channel_id"] = cid
+                row["name_norm"] = S.name_norm(row.get("file_name"))
+                row["caption_norm"] = S.caption_norm(row.get("caption"))
+                buf.append(row)
+                found += 1
+                seen += 1
+                if len(buf) >= 200:
+                    self.db.add_files(buf)
+                    buf = []
+                self.progress.seen = seen
+                self.progress.files = found
+                self.progress.last_msg_id = max(self.progress.last_msg_id, int(row.get("msg_id") or 0))
+                self.progress.pct = self._pct_index()
+                self.db.update_scan(self.scan_id, seen_msgs=seen, files_found=found,
+                                    phase="index", max_id=self.progress.last_msg_id)
+                await self._emit()
+            if buf:
+                self.db.add_files(buf)
+            self.progress.pct = 70.0
+            self.progress.phase = "match"
+            self.progress.note = "تحلیلِ نامزدها…"
+            await self._emit(force=True)
+
+            # ── فازِ ۲: هش‌گذاریِ نامزدها ──
+            files = self.db.files_of_channel(cid)
+            res.files = len(files)
+            res.found = found
+            if str(cfg.get("hash_mode") or "candidates") != "off" and files:
+                ids = M.hash_candidate_ids(files, cfg)
+                self.progress.hash_total = len(ids)
+                if ids:
+                    self.progress.note = "هش‌گذاریِ نامزدها (دانلودِ جزئی)…"
+                    await self._emit(force=True)
+                    await self._hash_ids(cfg, tg_id, files, ids)
+                    files = self.db.files_of_channel(cid)
+                    res.hashed = self.progress.hashed
+            self._check()
+
+            # ── فازِ ۳: گروه‌بندیِ نهایی ──
+            self.progress.phase = "match"
+            self.progress.pct = max(self.progress.pct, 96.0)
+            self.progress.note = "گروه‌بندیِ نهایی…"
+            await self._emit(force=True)
+            clusters = M.find_clusters(files, cfg)
+            self.db.replace_groups(self.scan_id, cid, clusters)
+            res.groups = len(clusters)
+            res.status = "done"
+            res.seconds = round(time.time() - t0, 1)
+            self.progress.phase = "done"
+            self.progress.pct = 100.0
+            self.progress.note = "تمام شد"
+            self.db.update_scan(self.scan_id, status="done", phase="done", finished_at=int(time.time()),
+                                total_msgs=total, seen_msgs=self.progress.seen, files_found=res.found,
+                                hashed=res.hashed, groups_found=res.groups)
+            self.db.set_channel_scan(cid, self.scan_id, int(time.time()))
+            self.db.log_action("scan_done", "channel=%s files=%d groups=%d in=%ss" % (cid, res.files, res.groups, res.seconds))
+            await self._emit(force=True)
+        except Canceled:
+            if buf:                              # 🩹 آنچه خوانده شده بود حفظ می‌شود
+                try:
+                    self.db.add_files(buf)
+                    buf = []
+                except Exception:
+                    pass
+            res.canceled = True
+            res.status = "canceled"
+            res.seconds = round(time.time() - t0, 1)
+            res.found = found
+            res.files = self.db.count_files(cid)
+            try:  # نتایجِ جزئی هم بی‌فایده نباشد
+                clusters = M.find_clusters(self.db.files_of_channel(cid), cfg)
+                self.db.replace_groups(self.scan_id, cid, clusters)
+                res.groups = len(clusters)
+            except Exception:
+                pass
+            self.progress.phase = "canceled"
+            self.progress.note = "کنسل شد"
+            self.db.update_scan(self.scan_id, status="canceled", phase="canceled", finished_at=int(time.time()),
+                                files_found=res.found, groups_found=res.groups)
+            self.db.set_channel_scan(cid, self.scan_id, int(time.time()))
+            self.db.log_action("scan_cancel", "channel=%s files=%d" % (cid, res.files))
+            await self._emit(force=True)
+        except Exception as e:
+            if buf:
+                try:
+                    self.db.add_files(buf)
+                    buf = []
+                except Exception:
+                    pass
+            res.status = "error"
+            res.error = str(e)[:400]
+            res.seconds = round(time.time() - t0, 1)
+            self.progress.phase = "error"
+            self.progress.note = res.error
+            log.exception("اسکنِ کانال %s شکست خورد", cid)
+            self.db.update_scan(self.scan_id, status="error", phase="error", finished_at=int(time.time()),
+                                error=res.error)
+            await self._emit(force=True)
+        finally:
+            self.running = False
+        return res
+
+    def _pct_index(self) -> float:
+        """درصدِ فازِ ایندکس (۰..۶۸).
+
+        اگر تعدادِ کلِ پیام‌ها معلوم باشد از آن، وگرنه از موقعیتِ شناسهٔ پیام در
+        بازهٔ [شروع … آخرین پیامِ کانال] تخمین می‌زنیم — نوارِ درصد نباید یخ بزند.
+        """
+        p = self.progress
+        if p.total and p.total > 0:
+            return min(68.0, 68.0 * float(p.seen) / float(p.total))
+        top = int(p.top_id or 0)
+        base = int(p.new_since or 0)
+        cur = int(p.last_msg_id or 0)
+        if top > base and cur > base:
+            return min(68.0, 68.0 * float(cur - base) / float(top - base))
+        return 1.0
+
+    async def _probe(self, tg_id: int) -> Tuple[int, int]:
+        """(تعدادِ کلِ پیام‌های کانال، آخرین شناسهٔ پیام) — برای نوارِ درصد."""
+        total = 0
+        last = 0
+        try:
+            msgs = await self.user.probe(tg_id)
+            total = int(msgs.get("total") or 0)
+            last = int(msgs.get("last_id") or 0)
+        except Exception as e:
+            log.debug("probe خطا: %s", e)
+        return total, last
+
+    async def _hash_ids(self, cfg: Dict[str, Any], tg_id: int, files: Sequence[Dict[str, Any]],
+                        ids: Sequence[int]) -> None:
+        by_id = {int(f["id"]): f for f in files}
+        todo: List[Tuple[int, int]] = []      # (msg_id, size)
+        for fid in ids:
+            f = by_id.get(int(fid))
+            if not f:
+                continue
+            if str(f.get("content_hash") or ""):
+                self.progress.hashed += 1
+                continue
+            todo.append((int(f["msg_id"]), int(f.get("size") or 0)))
+        batch = 100
+        for i in range(0, len(todo), batch):
+            self._check()
+            chunk = todo[i:i + batch]
+            try:
+                out = await self.user.hash_batch(tg_id, chunk)
+            except Exception as e:
+                log.info("hash_batch خطا: %s", e)
+                out = {}
+            for msg_id, size in chunk:
+                res = out.get(int(msg_id)) or ("", "")
+                h, scope = (res if isinstance(res, tuple) else (res or "", ""))
+                self.progress.hashed += 1
+                if h:
+                    for f in files:
+                        if int(f.get("msg_id") or 0) == int(msg_id) and int(f["id"]) in by_id:
+                            self.db.set_hash(int(f["id"]), str(h), str(scope))
+                            break
+            self.progress.pct = 70.0 + (25.0 * min(1.0, float(self.progress.hashed) / max(1, self.progress.hash_total or len(todo))))
+            self.progress.note = "هش‌گذاری: %d از %d" % (self.progress.hashed, len(todo))
+            await self._emit()
+        self.progress.pct = 95.0
+        await self._emit(force=True)
