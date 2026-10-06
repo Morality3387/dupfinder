@@ -344,10 +344,20 @@ class UserClient:
             errors.append(type(e).__name__)
 
         uname = str((self._hints.get(key) or {}).get("username") or "").lstrip("@")
-        if uname:                                        # ۴) یوزرنیمِ کمکی
+        if uname:                                        # ۴) یوزرنیمِ کمکی (با کنترلِ هویت)
             try:
                 ent = await self.client.get_entity("@" + uname)
-                if ent is not None:
+                got = self._channel_id_of(getattr(ent, "id", 0) or 0) if ent is not None else 0
+                want = self._channel_id_of(tg_id)
+                if ent is None:
+                    errors.append("username:khali")
+                elif int(got) and int(got) != int(want):
+                    # یوزرنیم عوض شده یا به کانالِ دیگری رسیده ⇒ **نباید** به‌جای این کانال
+                    # برگردانده شود (باگِ گزارش‌شده: احتمالِ اسکنِ کانالِ اشتباه).
+                    log.warning("یوزرنیمِ ذخیره‌شده (%s ⇒ %s) با کانالِ درخواستی (%s) یکی نیست؛ "
+                                "نادیده گرفته شد.", uname, got, want)
+                    errors.append("username:digar")
+                else:
                     self._remember_entity(key, ent)
                     return ent
             except Exception as e:
@@ -355,10 +365,12 @@ class UserClient:
 
         self.entity_misses.append(int(key))
         log.warning("حلِ موجودیت ناموفق: tg_id=%s (تلاش‌ها: %s)", tg_id, ",".join(errors) or "-")
+        extra = ("\nتوجه: یوزرنیمِ ذخیره‌شدهٔ این کانال حالا به کانالِ <b>دیگری</b> می‌رسد؛ "
+                 "کانال را با لینکِ تازه‌اش دوباره به ربات بدهید." if "username:digar" in errors else "")
         raise ValueError(
             "کانال %s در سشن پیدا نشد. راهِ حل: ① کانال را با همین حساب یک‌بار باز کنید یا "
             "دوباره با لینک/یوزرنیم به ربات بدهید، ② یا حسابِ کاربری را وصل کنید (🔑) تا "
-            "دسترسی‌ها تازه شود." % tg_id)
+            "دسترسی‌ها تازه شود.%s" % (tg_id, extra))
 
     def peer_snapshot(self) -> Dict[str, Any]:
         """{tg_id: access_hash} — برای ذخیره در دیتابیس و استفاده پس از ری‌استارت."""
