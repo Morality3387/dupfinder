@@ -107,23 +107,55 @@ class UserClient:
         return True
 
     async def send_code(self, phone: str) -> str:
+        """درخواستِ کدِ ورود. هر بار صدا زده شود، **کدِ قبلی باطل می‌شود**.
+
+        شماره نرمال می‌شود (ارقام + پیشوندِ «+») تا هم شمارهٔ تایپ‌شده و هم
+        شمارهٔ دکمهٔ «ارسالِ شمارهٔ من» درست کار کند.
+        """
+        phone = norm_phone(phone)
         await self.connect_only()
         sent = await self.client.send_code_request(phone)
+        self.last_code_phone = phone
+        log.info("کدِ ورود برای %s…%s فرستاده شد", phone[:4], phone[-3:])
         return str(getattr(sent, "phone_code_hash", "") or "")
 
     async def sign_in(self, phone: str, code: str, phone_code_hash: str = "") -> Dict[str, Any]:
-        """خروجی: {ok, need_password, error}"""
-        from telethon.errors import SessionPasswordNeededError
+        """خروجی: {ok, need_password, error, kind}
+
+        kind ∈ ok | password | expired | invalid | flood | other — ربات با آن پیامِ
+        درست به کاربر می‌دهد (مثلاً «کدِ تازه بفرست» به‌جای برگشتن به گامِ اول).
+        """
+        from telethon.errors import (SessionPasswordNeededError, PhoneCodeExpiredError,
+                                     PhoneCodeInvalidError, PhoneCodeEmptyError, FloodWaitError)
+        code = str(code).replace(" ", "").replace("-", "").strip()
+        phone = norm_phone(phone)
         try:
             await self.connect_only()
-            kwargs = {}
+            kwargs: Dict[str, Any] = {}
             if phone_code_hash:
                 kwargs["phone_code_hash"] = phone_code_hash
-            await self.client.sign_in(phone=phone, code=str(code).replace(" ", ""), **kwargs)
+            await self.client.sign_in(phone=phone, code=code, **kwargs)
         except SessionPasswordNeededError:
-            return {"ok": False, "need_password": True, "error": ""}
+            log.info("کد درست بود؛ حساب رمزِ دو مرحله‌ای دارد")
+            return {"ok": False, "need_password": True, "error": "", "kind": "password"}
+        except (PhoneCodeExpiredError, PhoneCodeEmptyError) as e:
+            log.warning("sign_in: کدِ منقضی/خالی (%s)", e)
+            return {"ok": False, "need_password": False, "error": str(e), "kind": "expired"}
+        except PhoneCodeInvalidError as e:
+            log.warning("sign_in: کدِ اشتباه (%s)", e)
+            return {"ok": False, "need_password": False, "error": str(e), "kind": "invalid"}
+        except FloodWaitError as e:
+            log.warning("sign_in: FloodWait %s ثانیه", getattr(e, "seconds", "?"))
+            return {"ok": False, "need_password": False,
+                    "error": "FLOOD_WAIT_%s" % getattr(e, "seconds", ""), "kind": "flood"}
         except Exception as e:
-            return {"ok": False, "need_password": False, "error": str(e)}
+            msg = str(e)
+            low = msg.lower()
+            kind = ("expired" if "expired" in low else
+                    "invalid" if "invalid" in low else
+                    "flood" if "flood" in low or "too many" in low else "other")
+            log.warning("sign_in ناموفق (%s): %s", kind, msg)
+            return {"ok": False, "need_password": False, "error": msg, "kind": kind}
         self.session_string = self.client.session.save()
         me = await self.client.get_me()
         self.me = {"id": getattr(me, "id", 0), "username": getattr(me, "username", "") or "",
@@ -133,9 +165,12 @@ class UserClient:
     async def sign_in_password(self, password: str) -> Dict[str, Any]:
         try:
             await self.connect_only()
-            await self.client.sign_in(password=password)
+            await self.client.sign_in(password=str(password))
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            low = str(e).lower()
+            kind = "flood" if "flood" in low else ("password" if "password" in low else "other")
+            log.warning("sign_in_password ناموفق (%s): %s", kind, e)
+            return {"ok": False, "error": str(e), "kind": kind}
         self.session_string = self.client.session.save()
         me = await self.client.get_me()
         self.me = {"id": getattr(me, "id", 0), "username": getattr(me, "username", "") or "",
@@ -399,6 +434,12 @@ def chunk_plan(size: int, chunk: int = CHUNK) -> List[Tuple[int, int]]:
         if all(off != o for o, _ in plan):
             plan.append((off, ln))
     return plan
+
+
+def norm_phone(s: Any) -> str:
+    """شماره را به شکلِ «+ارقام» درمی‌آورد (هم برای تایپ، هم برای دکمهٔ تماس)."""
+    digits = re.sub(r"[^\d]", "", str(s or ""))
+    return ("+" + digits) if digits else ""
 
 
 _PHONE_RE = re.compile(r"^\+?\d{6,15}$")
