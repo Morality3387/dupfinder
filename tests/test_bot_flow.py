@@ -243,6 +243,40 @@ def test_full_scan_report_forward_and_actions():
         e.close()
 
 
+PREVIEW_HTML = """
+<div class="tgme_widget_message_wrap js-widget_message_wrap">
+ <div class="tgme_widget_message" data-post="testchan/101" data-view="x">
+  <div class="tgme_widget_message_bubble">
+   <div class="tgme_widget_message_text js-message_text" dir="auto">فیلم تست 1080p</div>
+   <div class="tgme_widget_message_video_player">
+     <i class="message_video_duration js-message_video_duration">1:30:00</i>
+   </div>
+   <time datetime="2026-01-05T10:00:00+00:00"></time>
+  </div>
+ </div>
+</div>
+<div class="tgme_widget_message_wrap js-widget_message_wrap">
+ <div class="tgme_widget_message" data-post="testchan/102" data-view="x">
+  <div class="tgme_widget_message_bubble">
+   <div class="tgme_widget_message_text js-message_text" dir="auto">فیلم تست 1080p</div>
+   <div class="tgme_widget_message_video_player">
+     <i class="message_video_duration js-message_video_duration">1:30:00</i>
+   </div>
+   <time datetime="2026-01-06T11:30:00+00:00"></time>
+  </div>
+ </div>
+</div>
+<div class="tgme_widget_message_wrap js-widget_message_wrap">
+ <div class="tgme_widget_message" data-post="testchan/103" data-view="x">
+  <div class="tgme_widget_message_bubble">
+   <div class="tgme_widget_message_text js-message_text" dir="auto">اخبار ورزشی امروز</div>
+   <time datetime="2026-01-07T12:00:00+00:00"></time>
+  </div>
+ </div>
+</div>
+"""
+
+
 def test_scan_without_user_account_shows_history_guidance():
     with tempfile.TemporaryDirectory() as d:
         e = Env(Path(d), ready=False)
@@ -252,7 +286,46 @@ def test_scan_without_user_account_shows_history_guidance():
         assert "تاریخچهٔ کانال" in txt and "اتصالِ حساب" in txt and "۳۰ ثانیه" in txt
         assert e.bot.scan is None
         e.tap("scan:limited:%d" % cid)
-        assert "حسابِ کاربری" in e.last()
+        assert "عمومی" in e.last_view() and "حسابِ کاربری" in e.last_view()
+        e.close()
+
+
+def test_limited_scan_works_for_public_channel():
+    """«⚠️ اسکنِ محدود» باید واقعاً کار کند (قبلاً پیامِ «پیاده‌سازی نشده» می‌داد)."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False)
+        cid = e.add_channel()                       # یوزرنیمِ عمومی دارد (testchan)
+        calls = []
+
+        async def fake_fetch(username, before=0, **kw):
+            calls.append((username, int(before)))
+            return "" if before == 101 else PREVIEW_HTML
+
+        e.bot.preview_fetch = fake_fetch
+        e.tap("scan:limited:%d" % cid)
+        assert calls and calls[0][0] == "testchan"
+        scan = e.db.last_scan(cid)
+        assert scan and scan["status"] == "done" and scan["groups_found"] == 1
+        groups = e.db.groups_of_scan(scan["id"])
+        assert len(groups) == 1
+        members = [m["msg_id"] for m in e.db.group_members(groups[0]["id"])]
+        assert members == [101, 102]                # ویدیوهایی با کپشنِ یکسان
+        assert "کپشن" in groups[0]["reason"]
+        assert len(e.db.files_of_channel(cid)) == 2  # پستِ متنی نادیده گرفته شد
+        assert "اسکنِ محدود" in e.last_view()        # صداقت دربارهٔ محدودیت
+        e.close()
+
+
+def test_limited_scan_private_channel_gives_real_alternative():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False)
+        cid = e.add_channel()
+        e.db._exec("UPDATE channels SET username='' WHERE id=?", (cid,))   # کانالِ بی‌یوزرنیم
+        e.db.conn.commit()
+        e.tap("scan:limited:%d" % cid)
+        txt = e.last_view()
+        assert "عمومی" in txt and "حسابِ کاربری" in txt
+        assert e.db.last_scan(cid) is None           # اسکنی شروع نشده
         e.close()
 
 
