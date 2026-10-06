@@ -357,7 +357,6 @@ def doc(msg_id: int, name: str, size: int, caption: str = "", mime: str = "appli
 
 def channel_dataset() -> Dict[str, Any]:
     """سناریوی کاملِ تست: هر نوع تکراری که ربات باید پیدا کند."""
-    T = 3 * MB
     v = [
         # ۱) تکراریِ قطعی با هش (دو آپلودِ جدا، بایت‌های یکسان)
         video(101, "Black.Mirror.S01E01.1080p.WEB-DL.x265.mkv", size=200 * MB, duration=3600,
