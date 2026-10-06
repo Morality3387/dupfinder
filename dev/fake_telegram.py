@@ -175,6 +175,7 @@ class FakeUser:
         self.last_error = ""
         self.probed: List[int] = []
         self.qr_times_out: bool = False          # برای تستِ انقضای QR
+        self.empty_hint: bool = False            # کانالِ کاملاً خالی (برای تستِ پاک‌سازی)
         self.qr_refresh_limit: int = 99
         self.admin_fails: bool = False
         self._admins: Dict[int, set] = {}
@@ -276,15 +277,32 @@ class FakeUser:
         return {"total": self.total_hint or len(rows), "last_id": last}
 
     async def iter_videos(self, tg_id: int, *, min_id: int = 0, max_id: int = 0, media_kinds: str = "video",
-                          wait_time: float = 0.3, batch: int = 200):
+                          wait_time: float = 0.3, batch: int = 200, stats: Optional[Dict[str, Any]] = None):
+        """همان قراردادِ `UserClient.iter_videos` — با آمارِ `visited/matched/completed`."""
+        if stats is not None:
+            stats.clear()
+            stats["visited"] = 0
+            stats["matched"] = 0
+            stats["completed"] = False
         rows = [dict(r) for r in self.videos.get(int(tg_id), []) if int(r.get("msg_id") or 0) > int(min_id or 0)]
         # همان فیلترِ کلاینتِ واقعی (قبلاً حالتِ «video+doc»/«all» در شبیه‌ساز بی‌اثر بود)
         rows = [r for r in rows if _kind_ok(r, media_kinds)]
         rows.sort(key=lambda r: int(r.get("msg_id") or 0))
+        if stats is not None:
+            stats["entity_ok"] = True
         for r in rows:
+            if stats is not None:
+                stats["visited"] = int(stats["visited"]) + 1      # شبیه‌ساز فقط پیام‌های مدیادار دارد
+                stats["matched"] = int(stats["matched"]) + 1
             if self.delay:
                 await asyncio.sleep(self.delay)
             yield r
+        if stats is not None:
+            stats["completed"] = True
+
+    async def channel_is_empty(self, tg_id: int) -> bool:
+        """در شبیه‌ساز: کانال وقتی خالی است که هیچ فایلی نداشته باشد (تعدادِ `empty_hint` هم صفر)."""
+        return not self.videos.get(int(tg_id), []) and not int(self.total_hint or 0)
 
     # ── همان API کلاینتِ واقعی برای هینت/هشِ دسترسی (کانالِ خصوصی) ──
     def set_hint(self, tg_id: int, *, username: str = "", access_hash: Optional[int] = None,
