@@ -24,6 +24,9 @@ MTProto)** — that is what makes "see every video in the channel" actually work
 | ⏹ **Cancel / resume** | partial results are kept; `🔄 continue` reads only new posts |
 | 🧬 **Content hash** | head + middle + tail of each file (3 × 128 KB), partial downloads only |
 | 📎 **Forward results** | `forwardMessage` (bot) → `copyMessage` → user-account forward → plain links |
+| 📤 **One-tap forward all** | every duplicate group is sent in one go, with a header (original vs duplicates) |
+| 📷 **QR login** | connect the user account without ever typing a login code into the chat |
+| ➕ **One-tap admin** | the bot adds itself as channel admin (never with delete rights) |
 | 🗂 **Grouped output** | ★★★★ hash-identical · ★★★ same size+duration · ★★ similar name · ★ similar caption |
 | 📡 **Multi-channel** | tap a channel to scan it, `/scanall` for all of them |
 | 🧠 **Smart matching** | Persian/Arabic normalization, episode detection, false-positive guards |
