@@ -64,7 +64,8 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 (اسکن، دیدنِ نتیجه، فوروارد). «👥 ادمین‌های ربات» ← «➕ افزودنِ ادمین» و فرستادنِ <b>شناسهٔ عددی</b>
 یا یک <b>پیامِ فورواردشده از آن شخص</b>؛ دستورِ سریع: <code>/addadmin 123456789</code> ·
 حذف: <code>/deladmin 123456789</code> · فهرست: <code>/admins</code>.
-ادمین‌ها به «حسابِ کاربری»، «تنظیمات» و «مدیریتِ ادمین‌ها» دسترسی ندارند (فقط مالک).
+ادمین‌ها «تنظیمات»، اسکن، گزارش و فوروارد را دارند؛ فقط «حسابِ کاربری» (سشنِ تلگرامِ مالک)،
+«مدیریتِ ادمین‌ها» و «حذفِ کانال از فهرست» در دستِ مالک است.
 
 ⚙️ <b>تنظیمات:</b> از منوی اصلی («⚙️ تنظیمات») یا دستورِ <code>/settings</code>. تغییرِ متنی:
 <code>/set کلید مقدار</code> — مثلاً <code>/set hash_scope full</code> · <code>/set گروه‌بندی سخت‌گیرانه</code>.
@@ -79,12 +80,17 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 
 # ═══════════ نرمال‌سازیِ مقدارهای تنظیمات (پذیرشِ فارسی، ارقامِ فارسی، مترادف‌ها) ═══════════
 def _squash(v: str) -> str:
-    """نرمال‌سازیِ سخت‌گیرانه: بدونِ فاصله/نیم‌فاصله + یکسان‌سازیِ ی/ک عربی.
+    """نرمال‌سازیِ سخت‌گیرانه: بدونِ فاصله/نیم‌فاصله/اعراب + یکسان‌سازیِ حروفِ عربی/فارسی.
 
-    تا «سخت‌گیرانه»، «سخت گیرانه»، «سختگیرانه» و «ي»/«ی» همه یک چیز حساب شوند.
+    تا «دامنهٔ هش»، «دامنه هش»، «سخت‌گیرانه» و «سخت گیرانه» همه یک چیز حساب شوند
+    (و ی/ک عربی و «آ/أ/إ» هم به شکلِ فارسیِ ساده بیایند).
     """
-    v = str(v or "").strip().lower()
-    for a, b in (("\u064a", "\u06cc"), ("\u0643", "\u06a9"), ("\u0629", "\u0647"),
+    import unicodedata
+    v = unicodedata.normalize("NFKC", str(v or "")).lower()
+    v = "".join(ch for ch in v if not unicodedata.combining(ch))     # اعراب/همزهٔ ترکیبی
+    for a, b in (("\u064a", "\u06cc"), ("\u0649", "\u06cc"), ("\u0643", "\u06a9"),
+                 ("\u0629", "\u0647"), ("\u06c0", "\u0647"), ("\u06d5", "\u0647"),
+                 ("\u0622", "\u0627"), ("\u0623", "\u0627"), ("\u0625", "\u0627"),
                  ("\u200c", ""), ("\u0650", ""), ("\u0640", "")):
         v = v.replace(a, b)
     return "".join(v.split())
@@ -311,8 +317,8 @@ class BotApp:
                   "② یا یک <b>پیامِ فورواردشده از او</b> را برای ربات بفرستید،",
                   "③ یا وقتی غریبه‌ای به ربات پیام می‌دهد، مالک یک دکمهٔ «➕ افزودن» می‌گیرد.",
                   "",
-                  "<i>ادمین‌ها همه‌کارهٔ اسکن/گزارش/فوروارد هستند، ولی به «حسابِ کاربری»، «تنظیمات» "
-                  "و «مدیریتِ ادمین‌ها» دسترسی ندارند.</i>"]
+                  "<i>ادمین‌ها همه‌کارهٔ اسکن/گزارش/فوروارد و «⚙️ تنظیمات» هستند؛ فقط «🔑 حسابِ کاربری» "
+                  "(سشنِ تلگرامِ مالک)، «👥 مدیریتِ ادمین‌ها» و «🗑 حذفِ کانال از فهرست» در دستِ مالک است.</i>"]
         rows: List[List[Dict[str, str]]] = [[R.btn("➕ افزودنِ ادمین", "own:ask")]]
         if self.admin_ids:
             rows.append([R.btn("🗑 حذفِ ادمین", "own:delmenu")])
@@ -358,8 +364,8 @@ class BotApp:
         self.add_admin(uid, name)
         await self.api.send_message(
             chat, "✅ <b>%s</b> به‌عنوانِ ادمینِ ربات اضافه شد (<code>%d</code>).\n"
-                  "<i>ادمین می‌تواند کانال اضافه/اسکن کند و نتیجه ببیند؛ «حسابِ کاربری» و «تنظیمات» "
-                  "فقط در دستِ مالک است.</i>" % (esc(name or "کاربر"), uid),
+                  "<i>ادمین می‌تواند کانال اضافه/اسکن کند، تنظیمات را عوض کند و نتیجه ببیند؛ "
+                  "«حسابِ کاربری» و «مدیریتِ ادمین‌ها» فقط در دستِ مالک است.</i>" % (esc(name or "کاربر"), uid),
             kb=R.kb([[R.btn("👥 ادمین‌ها", "own:menu")]]))
 
     # ── مالکیتِ یک‌بارمصرف (claim) ──
@@ -549,21 +555,9 @@ class BotApp:
                      "اسکنِ جاری: %s" % ("⏳ بله" if (self.scan and not self.scan.get("done")) else "—")]
             await self.api.send_message(chat, "\n".join(lines))
         elif cmd in ("settings", "st", "config"):
-            if not (self.owner_id and int(uid) == int(self.owner_id)):
-                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
-                return
             await self._settings_menu(chat)
         elif cmd in ("set", "setting"):
-            if not (self.owner_id and int(uid) == int(self.owner_id)):
-                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
-                return
-            parts = arg.split(None, 1)
-            if len(parts) < 2:
-                await self.api.send_message(
-                    chat, "مثال: <code>/set hash_scope full</code>\nکلیدها: <code>%s</code>"
-                          % " · ".join(sorted(SHORT_LABELS)))
-                return
-            await self._apply_setting_text(chat, parts[0], parts[1])
+            await self._apply_setting_text(chat, arg)
         elif cmd in ("admins", "admin"):
             if not (self.owner_id and int(uid) == int(self.owner_id)):
                 await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
@@ -1096,18 +1090,36 @@ class BotApp:
                 chat, text + "\n\n⚠️ دکمه‌ها ارسال نشد (<code>%s</code>)؛ با دستورِ "
                              "<code>/set کلید مقدار</code> تغییر دهید." % esc(e))
 
-    async def _apply_setting_text(self, chat: int, key: str, value: str) -> None:
-        """`/set <کلید> <مقدار>` — راهِ متنیِ تنظیمات (وقتی دکمه‌ها دردسر دارند)."""
-        key = str(key or "").strip()
-        if key in SHORT_LABELS or key in LABELS:
-            await self._apply_setting(chat, key, value)
-            return
-        found = [k for k, v in SHORT_LABELS.items() if _squash(v) == _squash(key)]
-        if len(found) == 1:
-            await self._apply_setting(chat, found[0], value)
-            return
-        keys = " · ".join(sorted(SHORT_LABELS))
-        await self.api.send_message(chat, "❌ کلیدِ نامعتبر. کلیدها:\n<code>%s</code>" % keys)
+    @staticmethod
+    def _match_setting_key(cand: str) -> Optional[str]:
+        """کلیدِ تنظیمات را از نامِ انگلیسی، برچسبِ کوتاه یا برچسبِ کاملِ فارسی پیدا می‌کند."""
+        c = str(cand or "").strip()
+        if not c:
+            return None
+        if c in LABELS or c in SHORT_LABELS:
+            return c
+        sq = _squash(c)
+        for k in SHORT_LABELS:
+            if sq and sq in (_squash(SHORT_LABELS[k]), _squash(LABELS.get(k, "")), _squash(k)):
+                return k
+        return None
+
+    async def _apply_setting_text(self, chat: int, text: str) -> None:
+        """`/set <کلید> <مقدار>` — کلیدِ فارسیِ چندکلمه‌ای هم قبول است («دامنهٔ هش کامل»)."""
+        words = str(text or "").split()
+        if len(words) >= 2:
+            for take in (3, 2, 1):                       # بلندترین تطابق را اول امتحان می‌کنیم
+                if take >= len(words):
+                    continue
+                k = self._match_setting_key(" ".join(words[:take]))
+                if k:
+                    await self._apply_setting(chat, k, " ".join(words[take:]))
+                    return
+        await self.api.send_message(
+            chat,
+            "❌ کلیدِ نامعتبر.\nکلیدها (انگلیسی یا برچسبِ فارسی):\n<code>%s</code>\n\n"
+            "مثال: <code>/set hash_scope full</code> · <code>/set دامنهٔ هش کامل</code>"
+            % " · ".join(sorted(SHORT_LABELS)))
 
     @staticmethod
     def _norm_value(value: str) -> str:
@@ -2051,15 +2063,18 @@ class BotApp:
             return
         parts = data.split(":")
         op = parts[0] if parts else ""
-        # عملیاتِ مالکانه: حسابِ کاربری (sessions)، تنظیماتِ تطبیق و مدیریتِ ادمین‌ها
-        owner_only_op = op in ("acc", "st", "own") or data.startswith("ch:del:")
+        # فقط این‌ها مالکانه می‌مانند: «حسابِ کاربری» (سشنِ تلگرامِ مالک)، «مدیریتِ ادمین‌ها»
+        # و «حذفِ کانال از فهرست» (دادهٔ ایندکس را پاک می‌کند). تنظیماتِ تطبیق برای ادمین‌ها آزاد است
+        # (پرسشِ کاربر: با حسابِ ادمین، «⚙️ تنظیمات» هیچ کاری نمی‌کرد).
+        owner_only_op = op in ("acc", "own") or data.startswith("ch:del:")
         if owner_only_op and not (self.owner_id and int(uid) == int(self.owner_id)):
             await self.api.answer_callback(cq_id, "⛔️ فقط مالکِ ربات به این بخش دسترسی دارد", alert=True)
             # پیامِ روشن هم می‌فرستیم (alertِ گذرا ممکن است دیده نشود ⇒ «کار نمی‌کند»)
+            which = "«🔑 حسابِ کاربری»" if op == "acc" else ("«👥 مدیریتِ ادمین‌ها»" if op == "own"
+                                                            else "«🗑 حذفِ کانال»")
             await self.api.send_message(
-                chat, "⛔️ «%s» فقط در دستِ <b>مالکِ ربات</b> است.\n"
-                      "<i>شما ادمین هستید و می‌توانید اسکن و نتیجه و فوروارد را استفاده کنید. "
-                      "برای تنظیمات/حسابِ کاربری/مدیریتِ ادمین‌ها باید مالک باشید.</i>" % esc(data))
+                chat, "⛔️ %s فقط در دستِ <b>مالکِ ربات</b> است.\n"
+                      "<i>شما ادمین هستید: اسکن، تنظیمات، نتیجه و فوروارد برایتان آزاد است.</i>" % which)
             return
         try:
             if data == "home" or op == "home":
