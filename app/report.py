@@ -253,9 +253,11 @@ def groups_kb(channel_id: int, scan_id: int, filt: str, page: int, pages: int,
     return kb(rows)
 
 
-def group_kb(channel_id: int, scan_id: int, filt: str, page: int, gid: int) -> Dict[str, Any]:
-    return kb([
-        [btn("📎 فوروارد فایل‌های این گروه", "f:%d:%d:%s:%d:%d" % (scan_id, channel_id, filt, page, gid))],
+def group_kb(channel_id: int, scan_id: int, filt: str, page: int, gid: int, *,
+             can_forward: bool = True) -> Dict[str, Any]:
+    head = [[btn("📎 فوروارد فایل‌های این گروه",
+                 "f:%d:%d:%s:%d:%d" % (scan_id, channel_id, filt, page, gid))]] if can_forward else []
+    return kb(head + [
         [btn("🔗 لینکِ پیام‌ها", "u:%d:%d:%d" % (scan_id, channel_id, gid))],
         [btn("✔ رسیدگی شد", "m:%d:%d:%d:done" % (scan_id, channel_id, gid)),
          btn("🔒 نادیده بگیر", "m:%d:%d:%d:ign" % (scan_id, channel_id, gid))],
