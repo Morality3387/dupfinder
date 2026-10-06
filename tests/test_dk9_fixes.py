@@ -242,3 +242,19 @@ def test_title_refresh_is_rate_limited():
         assert 0 < second <= e.bot.title_refresh_max
         assert len(set(tried)) == len(tried), "برای یک کانال دو بار تلاش شد (کول‌داون رعایت نشد)"
         e.close()
+
+
+def test_prune_runs_when_media_kind_disappears_but_channel_has_other_posts(tmp_path):
+    """سناریوی گزارش‌شده: ویدیوها پاک شده‌اند و فقط سند مانده ⇒ رکوردهای ویدیو باید بروند."""
+    db, user, chan = setup(tmp_path)
+    run(Scanner(db, user, lambda: CFG).run(chan, full=True))
+    assert db.files_of_channel(chan["id"]), "قبل از تست باید رکوردِ ویدیو داشته باشیم"
+    # فقط پیامِ سند (pdf) می‌ماند؛ ویدیوها همه در تلگرام پاک شده‌اند
+    docs = [r for r in user.videos[55] if str(r.get("kind") or "") == "doc"]
+    assert docs, "دیتاستِ تست باید سند داشته باشد"
+    user.videos[55] = docs
+    user.contents.clear()
+    res = run(Scanner(db, user, lambda: CFG).run(chan, full=True))
+    assert db.files_of_channel(chan["id"]) == [], "رکوردِ ویدیوهای حذف‌شده ماند"
+    assert any("دیگر در کانال نیست" in n for n in (res.notes or []))
+    db.close()
