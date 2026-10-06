@@ -66,11 +66,81 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 حذف: <code>/deladmin 123456789</code> · فهرست: <code>/admins</code>.
 ادمین‌ها به «حسابِ کاربری»، «تنظیمات» و «مدیریتِ ادمین‌ها» دسترسی ندارند (فقط مالک).
 
+⚙️ <b>تنظیمات:</b> از منوی اصلی («⚙️ تنظیمات») یا دستورِ <code>/settings</code>. تغییرِ متنی:
+<code>/set کلید مقدار</code> — مثلاً <code>/set hash_scope full</code> · <code>/set گروه‌بندی سخت‌گیرانه</code>.
+مقدارهای فارسی هم قبول است («کامل»، «همه»، «خاموش/روشن») و ارقامِ فارسی («۰.۶») هم کار می‌کند.
+
 📡 <b>نامِ کانال‌ها:</b> در فهرست همیشه <b>نام</b> دیده می‌شود؛ اگر نامی از تلگرام خوانده نشده باشد
 دکمهٔ «🔄 تلاشِ دوباره برای نامِ کانال‌ها» آن را تازه می‌کند.
 
 🔎 <b>دربارهٔ دیدنِ تاریخچهٔ کامل:</b> ربات‌های معمولی (Bot API) از پست‌های <b>قبل از ادمین‌شدن‌شان</b> هیچ اطلاعی ندارند؛ در گروه‌ها هم فقط پیام‌های بعد از اضافه‌شدن. برای «<b>کلِ تاریخچه</b>» باید یک <b>حسابِ کاربری</b> وصل شود (همان حسابِ ادمینِ کانال یا یک اکانتِ مخصوصِ کار) — با دستورِ «🔑 اتصالِ حسابِ کاربری». آن‌وقت ربات از اولین پستِ کانال تا آخرین را می‌بیند. راهِ جایگزین اگر حساب نمی‌دهید: پست‌های قدیمی را در یک کانالِ آرشیو فوروارد کنید و همان را اسکن کنیم.
 """
+
+
+# ═══════════ نرمال‌سازیِ مقدارهای تنظیمات (پذیرشِ فارسی، ارقامِ فارسی، مترادف‌ها) ═══════════
+def _squash(v: str) -> str:
+    """نرمال‌سازیِ سخت‌گیرانه: بدونِ فاصله/نیم‌فاصله + یکسان‌سازیِ ی/ک عربی.
+
+    تا «سخت‌گیرانه»، «سخت گیرانه»، «سختگیرانه» و «ي»/«ی» همه یک چیز حساب شوند.
+    """
+    v = str(v or "").strip().lower()
+    for a, b in (("\u064a", "\u06cc"), ("\u0643", "\u06a9"), ("\u0629", "\u0647"),
+                 ("\u200c", ""), ("\u0650", ""), ("\u0640", "")):
+        v = v.replace(a, b)
+    return "".join(v.split())
+
+
+_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_TRUE_WORDS = {"1", "true", "yes", "y", "on", "روشن", "بله", "درست", "فعال", "اره", "آره"}
+_FALSE_WORDS = {"0", "false", "no", "n", "off", "خاموش", "نه", "غلط", "غیرفعال", "نخیر", "خیر"}
+
+# مترادف‌های مجاز برای کلیدهای «گزینه‌ای» (فارسی و انگلیسی، همه به مقدارِ انگلیسی نگاشت می‌شوند)
+VALUE_ALIASES: Dict[str, Dict[str, str]] = {
+    "hash_mode": {"off": "off", "خاموش": "off", "بدون": "off", "بدون هش": "off", "—": "off",
+                  "candidates": "candidates", "candidate": "candidates", "نامزد": "candidates",
+                  "نامزدها": "candidates", "نامزدی": "candidates",
+                  "all": "all", "همه": "all", "کامل": "all", "همگی": "all"},
+    "hash_scope": {"sample": "sample", "نمونه": "sample", "نمونه‌گیری": "sample", "سریع": "sample",
+                   "full": "full", "کامل": "full", "همه": "full", "کاملِ فایل": "full"},
+    "media_kinds": {"video": "video", "ویدیو": "video", "ویدئو": "video", "فیلم": "video",
+                    "video+doc": "video+doc", "video,doc": "video+doc", "video doc": "video+doc",
+                    "ویدیو+سند": "video+doc", "ویدیو و سند": "video+doc", "ویدیو,سند": "video+doc",
+                    "all": "all", "همه": "all", "کامل": "all", "همه چیز": "all"},
+    "cluster_mode": {"loose": "loose", "ازاد": "loose", "آزاد": "loose", "زنجیره‌ای": "loose",
+                     "زنجیره": "loose", "پیش‌فرض": "loose",
+                     "strict": "strict", "سخت": "strict", "سختگیر": "strict", "سختگیرانه": "strict",
+                     "همه با همه": "strict"},
+}
+
+# نمایهٔ «بی‌فاصله»ی همان مترادف‌ها (برای «سخت‌گیرانه»/«سخت گیرانه»/«بی‌فاصله» و ی/ک عربی)
+VALUE_ALIASES_SQUASHED: Dict[str, Dict[str, str]] = {
+    k: {_squash(kk): vv for kk, vv in m.items()} for k, m in VALUE_ALIASES.items()}
+
+# راهنمای مقدار (هم در پرسش و هم در پیامِ خطا استفاده می‌شود)
+VALUE_HELP: Dict[str, str] = {
+    "hash_mode": "off = بدونِ هش · candidates = فقط نامزدها (سریع) · all = همه (کند)",
+    "hash_scope": "sample = سه تکهٔ سر/میانه/ته (سریع) · full = کلِ فایل (کند، قطعی)",
+    "media_kinds": "video = فقط ویدیو · video+doc = ویدیو و سند · all = همه",
+    "cluster_mode": "loose = زنجیره‌ای (پیش‌فرض) · strict = هر عضو با همهٔ اعضا شبیه باشد",
+    "min_caption_len": "یک عدد (نویسه)؛ پیش‌فرض ۱۲ — کمتر = حساس‌تر و ریسکِ مثبتِ کاذب",
+    "min_duration_s": "یک عدد (ثانیه) — پیش‌فرض ۳",
+    "prune_missing": "1/روشن = رکوردهای حذف‌شده از کانال در اسکنِ کامل پاک شوند · 0/خاموش = نه",
+    "size_time_require_one_exact": "1/روشن = یکی از حجم یا زمان باید دقیقاً برابر باشد · 0/خاموش = فقط نزدیک بودن",
+    "incr_tail": "یک عدد = چند پیامِ آخر در اسکنِ ادامه‌ای بازخوانی شود (پیش‌فرض ۲۰۰)",
+}
+
+# برچسبِ کوتاهِ دکمه‌ها (برچسبِ کاملِ LABELS در متنِ توضیح می‌آید)
+SHORT_LABELS: Dict[str, str] = {
+    "hash_mode": "حالتِ هش", "hash_scope": "دامنهٔ هش",
+    "th_name_ratio": "نام/نسبت", "th_name_jaccard": "نام/توکن",
+    "th_cap_ratio": "کپشن/نسبت", "th_cap_jaccard": "کپشن/توکن",
+    "size_tol_pct": "تلورانسِ حجم٪", "size_tol_min": "تلورانسِ حجم/بایت",
+    "dur_tol_s": "تلورانسِ زمان", "min_duration_s": "حداقلِ زمان",
+    "max_forward_per_group": "سقفِ فوروارد/گروه", "media_kinds": "نوعِ فایل",
+    "cluster_mode": "گروه‌بندی", "min_caption_len": "حداقلِ کپشن",
+    "prune_missing": "پاک‌سازیِ حذف‌شده‌ها", "size_time_require_one_exact": "حجم/زمانِ دقیق",
+    "incr_tail": "بازخوانیِ آخر",
+}
 
 
 class BotApp:
@@ -478,6 +548,22 @@ class BotApp:
                      "حسابِ کاربری: %s" % ("✅ وصل" if getattr(self.user, "ready", False) else "❌ وصل نیست"),
                      "اسکنِ جاری: %s" % ("⏳ بله" if (self.scan and not self.scan.get("done")) else "—")]
             await self.api.send_message(chat, "\n".join(lines))
+        elif cmd in ("settings", "st", "config"):
+            if not (self.owner_id and int(uid) == int(self.owner_id)):
+                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
+                return
+            await self._settings_menu(chat)
+        elif cmd in ("set", "setting"):
+            if not (self.owner_id and int(uid) == int(self.owner_id)):
+                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
+                return
+            parts = arg.split(None, 1)
+            if len(parts) < 2:
+                await self.api.send_message(
+                    chat, "مثال: <code>/set hash_scope full</code>\nکلیدها: <code>%s</code>"
+                          % " · ".join(sorted(SHORT_LABELS)))
+                return
+            await self._apply_setting_text(chat, parts[0], parts[1])
         elif cmd in ("admins", "admin"):
             if not (self.owner_id and int(uid) == int(self.owner_id)):
                 await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
@@ -976,56 +1062,122 @@ class BotApp:
                 kb=R.kb([[R.btn("🔁 تلاشِ دوباره", "adm:%d" % cid)], [R.btn("⬅️ کانال", "c:%d" % cid)]]))
 
     # ═════════════════════ تنظیمات ═════════════════════
-    async def _settings_menu(self, chat: int) -> None:
-        s = self.settings
+    def _setting_rows(self) -> List[List[Dict[str, str]]]:
+        """ردیف‌های دکمهٔ تنظیمات با **برچسبِ کوتاه** (ریسکِ رد‌شدنِ دکمه‌های بلند را ندارد)."""
+        keys = ("hash_mode", "hash_scope", "media_kinds", "cluster_mode", "min_caption_len",
+                "th_name_ratio", "th_name_jaccard", "th_cap_ratio", "th_cap_jaccard",
+                "size_tol_pct", "size_tol_min", "dur_tol_s", "min_duration_s",
+                "max_forward_per_group", "prune_missing", "size_time_require_one_exact", "incr_tail")
+        pairs = [("⚙️ %s: %s" % (SHORT_LABELS.get(k, LABELS.get(k, k)), getattr(self.settings, k)), "st:%s" % k)
+                 for k in keys if hasattr(self.settings, k)]
         rows: List[List[Dict[str, str]]] = []
-        for k in ("hash_mode", "hash_scope", "th_name_ratio", "th_name_jaccard", "th_cap_ratio", "th_cap_jaccard",
-                  "size_tol_pct", "size_tol_min", "dur_tol_s", "min_duration_s", "max_forward_per_group",
-                  "media_kinds"):
-            rows.append([R.btn("⚙️ %s: %s" % (LABELS.get(k, k), getattr(s, k)), "st:%s" % k)])
+        for i in range(0, len(pairs), 2):                      # دو ستون ⇒ اسکرولِ کمتر
+            rows.append([R.btn(t, c) for t, c in pairs[i:i + 2]])
         rows.append([R.btn("♻️ بازگشت به پیش‌فرض", "st:reset"), R.btn("🏠 منوی اصلی", "home")])
+        return rows
+
+    async def _settings_menu(self, chat: int) -> None:
+        text = ("⚙️ <b>تنظیماتِ تطبیق</b>\n\n"
+                "<b>مقدارهای مجاز (فارسی هم قبول است):</b>\n"
+                "• حالتِ هش: <code>candidates</code> (نامزدها/سریع) · <code>all</code> (همه/کند) · <code>off</code> (خاموش)\n"
+                "• دامنهٔ هش: <code>sample</code> (نمونه/سریع) · <code>full</code> (کامل/قطعی)\n"
+                "• نوعِ فایل: <code>video</code> · <code>video+doc</code> · <code>all</code> (همه)\n"
+                "• گروه‌بندی: <code>loose</code> (زنجیره‌ای) · <code>strict</code> (سخت‌گیرانه)\n"
+                "• بله/خیر: <code>1</code>/<code>0</code> یا روشن/خاموش\n"
+                "• عددها: با ارقامِ فارسی هم می‌شود («۰.۶»)\n\n"
+                "روی هر مورد بزنید و مقدارِ تازه را بفرستید. برای دیدنِ توضیحِ کاملِ هر مورد، "
+                "همان مورد را بزنید.")
+        try:
+            await self.api.send_message(chat, text, kb=R.kb(self._setting_rows()))
+        except Exception as e:
+            # فال‌بک: اگر تلگرام کیبورد را نپذیرفت، متن می‌رود و کاربر با دستورِ /set هم می‌تواند تغییر دهد
+            log.warning("ارسالِ منوی تنظیمات با کیبورد ناموفق: %s", e)
+            await self.api.send_message(
+                chat, text + "\n\n⚠️ دکمه‌ها ارسال نشد (<code>%s</code>)؛ با دستورِ "
+                             "<code>/set کلید مقدار</code> تغییر دهید." % esc(e))
+
+    async def _apply_setting_text(self, chat: int, key: str, value: str) -> None:
+        """`/set <کلید> <مقدار>` — راهِ متنیِ تنظیمات (وقتی دکمه‌ها دردسر دارند)."""
+        key = str(key or "").strip()
+        if key in SHORT_LABELS or key in LABELS:
+            await self._apply_setting(chat, key, value)
+            return
+        found = [k for k, v in SHORT_LABELS.items() if _squash(v) == _squash(key)]
+        if len(found) == 1:
+            await self._apply_setting(chat, found[0], value)
+            return
+        keys = " · ".join(sorted(SHORT_LABELS))
+        await self.api.send_message(chat, "❌ کلیدِ نامعتبر. کلیدها:\n<code>%s</code>" % keys)
+
+    @staticmethod
+    def _norm_value(value: str) -> str:
+        """ارقامِ فارسی/عربی و جداکنندهٔ اعشارِ فارسی ⇒ ASCII (تا «۰.۶» هم کار کند)."""
+        return str(value or "").strip().translate(_DIGITS).replace("٫", ".").replace("،", ",").lower()
+
+    async def _invalid_setting(self, chat: int, key: str, *, keep: bool = True) -> None:
+        """مقدارِ نامعتبر: پیامِ روشن + **حفظِ حالتِ انتظار** تا مقدارِ درستِ بعدی گم نشود."""
+        if keep:
+            self.pending[chat] = {"kind": "setting", "key": key}
+        rows = [[R.btn("⚙️ تنظیمات", "st:menu")], [R.btn("🏠 منوی اصلی", "home")]]
         await self.api.send_message(
             chat,
-            "⚙️ <b>تنظیماتِ تطبیق</b>\n\n"
-            "• <b>حالتِ هش</b>: <code>candidates</code> = فقط نامزدها (سریع) · <code>all</code> = همه (کند) · <code>off</code>\n"
-            "• <b>دامنهٔ هش</b>: <code>sample</code> = سر+میانه+ته (سریع، «نشانهٔ قوی») · "
-            "<code>full</code> = کلِ فایل (کند، «قطعی») — سقفِ حجمش با <code>hash_full_max_mb</code>\n"
-            "• <b>آستانه‌ها</b>: هرچه کمتر، حساس‌تر (تکراریِ بیشتر) و ریسکِ اشتباه بیشتر.\n"
-            "• <b>حجم/زمان</b>: تلورانسِ حجم به درصد و تلورانسِ زمان به ثانیه.\n\n"
-            "برای تغییر، روی هر مورد بزنید و مقدارِ تازه را بفرستید.",
+            "❌ مقدارِ نامعتبر برای <b>%s</b>.\nمقدارِ فعلی: <code>%s</code>\n%s%s" % (
+                LABELS.get(key, key), getattr(self.settings, key, "—"),
+                ("مقدارهای مجاز: " + VALUE_HELP[key] + "\n") if key in VALUE_HELP else "",
+                "دوباره بفرستید (یا /cancel)." if keep else ""),
             kb=R.kb(rows))
 
     async def _ask_setting(self, chat: int, key: str) -> None:
         self.pending[chat] = {"kind": "setting", "key": key}
         cur = getattr(self.settings, key)
-        hint = {"hash_mode": "off یا candidates یا all",
-                "media_kinds": "video یا video+doc یا all",
-                "size_time_require_one_exact": "1/روشن = یکی از حجم یا زمان باید دقیقاً برابر باشد · 0/خاموش = فقط نزدیک بودن کافی است"}.get(key, "یک عدد")
+        hint = VALUE_HELP.get(key, "یک عدد")
         await self.api.send_message(chat, "⚙️ مقدارِ تازهٔ <b>%s</b> را بفرستید.\nمقدارِ فعلی: <code>%s</code>\n(%s)" % (
             LABELS.get(key, key), cur, hint))
 
     async def _apply_setting(self, chat: int, key: str, value: str) -> None:
-        self.pending.pop(chat, None)
-        v = value.strip()
-        if key == "hash_mode" and v not in ("off", "candidates", "all"):
-            await self.api.send_message(chat, "❌ فقط off / candidates / all")
-            return
-        if key == "media_kinds" and v not in ("video", "video+doc", "all"):
-            await self.api.send_message(chat, "❌ فقط video / video+doc / all")
-            return
-        try:
-            cur = getattr(self.settings, key)
-            if isinstance(cur, bool):
-                v2: Any = str(v).strip().lower() in ("1", "true", "yes", "on", "روشن", "بله", "درست")
-            elif isinstance(cur, int):
-                v2 = int(float(v))
-            elif isinstance(cur, float):
-                v2 = float(v)
+        v = self._norm_value(value)
+        cur = getattr(self.settings, key, None)
+        v2: Any = None
+        if key in VALUE_ALIASES:                        # گزینه‌ای‌ها: مترادفِ فارسی/انگلیسی
+            v2 = VALUE_ALIASES[key].get(v) or VALUE_ALIASES_SQUASHED[key].get(_squash(v))
+            if v2 is None:
+                await self._invalid_setting(chat, key)
+                return
+        elif isinstance(cur, bool):
+            if v in _TRUE_WORDS:
+                v2 = True
+            elif v in _FALSE_WORDS:
+                v2 = False
             else:
-                v2 = v
-        except Exception:
-            await self.api.send_message(chat, "❌ مقدار نامعتبر.")
-            return
+                await self._invalid_setting(chat, key)
+                return
+        elif isinstance(cur, int):
+            try:
+                v2 = int(float(v))
+            except Exception:
+                await self._invalid_setting(chat, key)
+                return
+            if v2 < 0 or (key == "min_duration_s" and v2 > 3600) or (key == "incr_tail" and v2 > 100000):
+                await self._invalid_setting(chat, key)
+                return
+        elif isinstance(cur, float):
+            try:
+                v2 = float(v)
+            except Exception:
+                await self._invalid_setting(chat, key)
+                return
+            if key.startswith("th_") and not (0.0 < v2 <= 1.0):
+                await self.api.send_message(
+                    chat, "❌ آستانه‌ها باید بین ۰ و ۱ باشند (مثلِ <code>0.6</code>)، نه <code>%s</code>.\n"
+                          "دوباره بفرستید." % esc(str(value)))
+                self.pending[chat] = {"kind": "setting", "key": key}
+                return
+            if key == "size_tol_pct" and v2 < 0:
+                await self._invalid_setting(chat, key)
+                return
+        else:
+            v2 = str(value).strip()
+        self.pending.pop(chat, None)
         setattr(self.settings, key, v2)
         self.db.kv_set("setting:" + key, v2)
         await self.api.send_message(chat, "✅ ذخیره شد: <b>%s</b> = <code>%s</code>" % (LABELS.get(key, key), v2),
@@ -1893,6 +2045,7 @@ class BotApp:
         uid = int((cq.get("from") or {}).get("id") or 0)
         cq_id = str(cq.get("id") or "")
         await self.api.answer_callback(cq_id)
+        log.info("callback: uid=%s data=%r", uid, data)
         if not await self.is_allowed(uid):
             await self.api.answer_callback(cq_id, "⛔️ دسترسی ندارید", alert=True)
             return
@@ -1902,6 +2055,11 @@ class BotApp:
         owner_only_op = op in ("acc", "st", "own") or data.startswith("ch:del:")
         if owner_only_op and not (self.owner_id and int(uid) == int(self.owner_id)):
             await self.api.answer_callback(cq_id, "⛔️ فقط مالکِ ربات به این بخش دسترسی دارد", alert=True)
+            # پیامِ روشن هم می‌فرستیم (alertِ گذرا ممکن است دیده نشود ⇒ «کار نمی‌کند»)
+            await self.api.send_message(
+                chat, "⛔️ «%s» فقط در دستِ <b>مالکِ ربات</b> است.\n"
+                      "<i>شما ادمین هستید و می‌توانید اسکن و نتیجه و فوروارد را استفاده کنید. "
+                      "برای تنظیمات/حسابِ کاربری/مدیریتِ ادمین‌ها باید مالک باشید.</i>" % esc(data))
             return
         try:
             if data == "home" or op == "home":
