@@ -95,10 +95,13 @@ def test_owner_adds_admin_by_id_and_admin_can_use_bot():
         # ادمین: دکمهٔ «ادمین‌های ربات» را نمی‌بیند (فقط مالک)
         e.text("/start", uid=5001, chat=5001)
         assert e.kb_btn("ادمین‌های ربات") is None
-        # ادمین: تنظیمات ممنوع
+        # ادمین: تنظیمات ممنوع — و **پیامِ روشن** می‌گیرد (نه سکوت)
         before = len([m for m in e.api.sent if int(m["chat_id"]) == 5001])
         e.tap("st:menu", uid=5001, chat=5001)
-        assert len([m for m in e.api.sent if int(m["chat_id"]) == 5001]) == before
+        after = [m for m in e.api.sent if int(m["chat_id"]) == 5001]
+        assert len(after) == before + 1
+        assert "فقط در دستِ <b>مالکِ ربات</b> است" in str(after[-1]["text"])
+        assert e.settings.hash_scope == "sample", "ادمین نباید تنظیمات را عوض کند"
         # ادمین: نمی‌تواند ادمینِ تازه اضافه کند
         e.tap("own:add:6001", uid=5001, chat=5001)
         assert 6001 not in e.bot.admin_ids
