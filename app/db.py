@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (
