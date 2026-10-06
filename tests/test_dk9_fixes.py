@@ -95,13 +95,18 @@ def test_owner_adds_admin_by_id_and_admin_can_use_bot():
         # ادمین: دکمهٔ «ادمین‌های ربات» را نمی‌بیند (فقط مالک)
         e.text("/start", uid=5001, chat=5001)
         assert e.kb_btn("ادمین‌های ربات") is None
-        # ادمین: تنظیمات ممنوع — و **پیامِ روشن** می‌گیرد (نه سکوت)
-        before = len([m for m in e.api.sent if int(m["chat_id"]) == 5001])
+        # ادمین: «⚙️ تنظیمات» آزاد است (درخواستِ کاربر: با حسابِ ادمین کار می‌کند)
         e.tap("st:menu", uid=5001, chat=5001)
-        after = [m for m in e.api.sent if int(m["chat_id"]) == 5001]
-        assert len(after) == before + 1
-        assert "فقط در دستِ <b>مالکِ ربات</b> است" in str(after[-1]["text"])
-        assert e.settings.hash_scope == "sample", "ادمین نباید تنظیمات را عوض کند"
+        assert "تنظیماتِ تطبیق" in e.last_to(5001)
+        e.tap("st:hash_scope", uid=5001, chat=5001)
+        e.text("full", uid=5001, chat=5001)
+        assert e.settings.hash_scope == "full", "ادمین تنظیمات را ذخیره نکرد"
+        # ولی بخش‌های مالکانه: پیامِ روشن می‌گیرد (نه سکوت)
+        e.tap("acc:menu", uid=5001, chat=5001)
+        assert "فقط در دستِ <b>مالکِ ربات</b> است" in e.last_to(5001)
+        assert "حسابِ کاربری" in e.last_to(5001)
+        e.tap("own:menu", uid=5001, chat=5001)
+        assert "مدیریتِ ادمین‌ها" in e.last_to(5001)
         # ادمین: نمی‌تواند ادمینِ تازه اضافه کند
         e.tap("own:add:6001", uid=5001, chat=5001)
         assert 6001 not in e.bot.admin_ids
