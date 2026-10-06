@@ -535,10 +535,28 @@ class BotApp:
                 % (R.fa_digits(p["step"]), R.fa_digits(total)))
         await self.api.send_message(
             chat,
-            "%s\n\nکدِ ۵ رقمی را همین‌جا بفرستید (با فاصله هم می‌شود: <code>1 2 3 4 5</code>).\n"
-            "⚠️ هر بار «کدِ تازه» بزنید، <b>آخرین</b> کد معتبر است — کدِ پیامِ قبلی باطل می‌شود.\n"
-            "⏱ کد نیامد؟ «🔁 ارسالِ کدِ تازه»." % head,
+            "%s\n\n%s\n\nمثال: <code>1 2 3 4 5</code> یا <code>1.2.3.4.5</code> یا <code>1-2-3-4-5</code>\n"
+            "⏱ کد نیامد؟ «🔁 ارسالِ کدِ تازه». هر بار کدِ تازه بگیرید، <b>آخرین</b> کد معتبر است."
+            % (head, R.CODE_FORMAT_HELP),
             kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+
+    @staticmethod
+    def _parse_code(text: str) -> Tuple[str, str]:
+        """کد را از متنِ کاربر درمی‌آورد. خروجی: (کد، how) با how ∈ ok|joined|bad
+
+        ⛔️ «joined» = کدِ ۴ تا ۶ رقمیِ یک‌پارچه؛ تلگرام آن را «قبلاً به‌اشتراک‌گذاشته»
+        می‌شمارد و ورود را بلاک می‌کند (با خطای گمراه‌کنندهٔ «code has expired»).
+        برای همین حالت هیچ‌وقت `sign_in` صدا زده نمی‌شود.
+        """
+        raw = str(text or "").strip()
+        compact = re.sub(r"[\s.\-_,،]+", "", raw)
+        if not compact.isdigit():
+            return "", "bad"
+        if 4 <= len(compact) <= 6 and re.search(r"[\s.\-_,،]", raw):
+            return compact, "ok"
+        if 4 <= len(compact) <= 6:
+            return "", "joined"
+        return "", "bad"
 
     @staticmethod
     def _login_err_kind(res: Dict[str, Any]) -> str:
@@ -593,7 +611,24 @@ class BotApp:
             return
         if kind == "login_code":
             await self._try_delete(chat, m.get("message_id"))
-            res = await self.user.sign_in(p["phone"], text, p.get("phone_code_hash") or "")
+            code, how = self._parse_code(text)
+            if how == "joined":
+                log.warning("کدِ یک‌پارچه آمد؛ sign_in صدا زده نشد (ریسکِ بلاکِ «code previously shared»)")
+                await self.api.send_message(
+                    chat,
+                    "⚠️ <b>این کد را قبول نکردم.</b>\n"
+                    "کدِ به‌هم‌چسبیده را تلگرام «قبلاً به‌اشتراک‌گذاشته» حساب می‌کند و ورود را بلاک می‌کند "
+                    "(همان پیامِ «Incomplete login attempt» که در تلگرام آمد).\n\n"
+                    "۱) «🔁 ارسالِ کدِ تازه» را بزنید (این کد دیگر قابلِ استفاده نیست)\n"
+                    "۲) کدِ جدید را <b>رقم‌رقم</b> بفرستید.\n\n" + R.CODE_FORMAT_HELP,
+                    kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+                return
+            if how == "bad":
+                await self.api.send_message(
+                    chat, "❌ این متن کدِ ورود نیست.\n" + R.CODE_FORMAT_HELP,
+                    kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+                return
+            res = await self.user.sign_in(p["phone"], code, p.get("phone_code_hash") or "")
             if res.get("ok"):
                 self.pending.pop(chat, None)
                 self.db.kv_set("session_string", self.user.session_string)
@@ -615,9 +650,11 @@ class BotApp:
             log.warning("ورود ناموفق (%s): %s", ek, res.get("error"))
             if ek == "expired":
                 await self.api.send_message(
-                    chat, "⌛️ <b>کدِ قبلی باطل/منقضی شد</b> — این معمولاً یعنی کدِ پیامِ قبلی را زده‌اید "
-                          "یا بین دو درخواست فاصله افتاده.\nدکمهٔ <b>«🔁 ارسالِ کدِ تازه»</b> را بزنید و "
-                          "<b>آخرین</b> کد را بفرستید.",
+                    chat, "⌛️ <b>این کد پذیرفته نشد.</b>\n"
+                          "دو علتِ رایج: ۱) کدِ پیامِ قبلی را زده‌اید  ۲) تلگرام کد را «قبلاً به‌اشتراک‌گذاشته» "
+                          "می‌داند (اگر پیامِ «Incomplete login attempt» در تلگرام آمده، همین است).\n"
+                          "«🔁 ارسالِ کدِ تازه» را بزنید و <b>آخرین</b> کد را <b>رقم‌رقم</b> بفرستید:\n"
+                          "<code>1 2 3 4 5</code>",
                     kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
                 return
             if ek == "invalid":
