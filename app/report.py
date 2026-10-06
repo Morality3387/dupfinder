@@ -35,6 +35,8 @@ def msg_link(channel: Dict[str, Any], msg_id: int) -> str:
 def date_fa(ts: int) -> str:
     """تاریخِ پست به وقتِ ایران (UTC+3:30) — بدونِ هشدارِ منسوخِ پایتون."""
     import datetime
+    if not ts or int(ts) < 0:
+        return "—"                       # پست بدونِ تاریخ (نادر) — نه ۱۹۷۰!
     try:
         d = datetime.datetime.fromtimestamp(int(ts or 0), tz=datetime.timezone.utc)
         d = d.astimezone(datetime.timezone(datetime.timedelta(hours=3, minutes=30)))
@@ -70,7 +72,7 @@ def scan_summary_text(scan: Dict[str, Any], channel: Dict[str, Any], counts: Dic
     st = {"done": "✅ کامل شد", "canceled": "⏹ کنسل شد", "error": "⚠️ خطا", "running": "⏳ در حال اجرا"}.get(
         str(scan.get("status")), str(scan.get("status")))
     lines = [
-        "📊 <b>گزارشِ اسکن</b> — <b>%s</b>" % esc(channel.get("title") or channel.get("username") or ""),
+        "📊 <b>گزارشِ اسکن</b> — <b>%s</b>" % esc(channel_title(channel)),
         "وضعیت: %s" % st,
     ]
     if int(scan.get("min_id") or 0) > 0:
@@ -201,6 +203,12 @@ def text_btn(text: str) -> Dict[str, Any]:
 
 def remove_kb() -> Dict[str, Any]:
     return {"remove_keyboard": True}
+
+
+def channel_title(c: Dict[str, Any]) -> str:
+    """نامِ نمایشیِ کانال: عنوان، بعد یوزرنیم، و در آخر شناسه (هیچ‌وقت شناسه اول نمی‌آید)."""
+    return str(c.get("title") or "").strip() or ("@" + str(c.get("username") or "").strip() if c.get("username") else "") \
+        or ("کانال " + str(c.get("tg_id") or ""))
 
 
 def kb(rows: List[List[Dict[str, str]]]) -> Dict[str, Any]:
