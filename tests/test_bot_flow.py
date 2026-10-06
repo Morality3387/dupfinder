@@ -94,6 +94,27 @@ class Env:
                 return str(params.get("text") or "")
         return ""
 
+    def last_view_kb(self):
+        """دکمه‌های آخرین صفحه‌ای که کاربر دید (چه ویرایش‌شده چه تازه‌فرستاده)."""
+        for method, params in reversed(self.api.calls):
+            if method == "editMessageText":
+                return ((params.get("reply_markup") or {}).get("inline_keyboard") or [])
+            if method == "sendMessage":
+                return ((params.get("reply_markup") or {}).get("inline_keyboard") or [])
+        return []
+
+    def view_datas(self):
+        """همهٔ callback_dataهای آخرین صفحه."""
+        return {b.get("callback_data") for row in self.last_view_kb() for b in row if b.get("callback_data")}
+
+    def all_view_text(self):
+        """همهٔ متن‌هایی که ربات فرستاده/ویرایش کرده (برای پیام‌های چندتکه مثلِ راهنما)."""
+        out = []
+        for method, params in self.api.calls:
+            if method in ("sendMessage", "editMessageText"):
+                out.append(str(params.get("text") or ""))
+        return "\n".join(out)
+
     def kb_btn(self, contains, *, sent=True):
         pool = self.api.sent if sent else []
         for m in reversed(pool):
@@ -407,19 +428,19 @@ def test_settings_change_validation_and_reset():
         e = Env(Path(d))
         e.tap("st:menu")
         assert "تنظیماتِ تطبیق" in e.last()      # ارسالِ تازه، نه ویرایش
-        e.tap("st:size_tol_pct")
+        e.tap("sta:size_tol_pct")
         e.text("1.5")
         assert e.settings.size_tol_pct == 1.5 and e.db.kv_get("setting:size_tol_pct") == 1.5
-        e.tap("st:hash_mode")
+        e.tap("sta:hash_mode")
         e.text("all")
         assert e.settings.hash_mode == "all"
-        e.tap("st:hash_mode")
+        e.tap("sta:hash_mode")
         e.text("چیزِ بی‌ربط")
         assert e.settings.hash_mode == "all" and "مقدارِ نامعتبر" in e.last()
         assert e.bot.pending.get(CHAT, {}).get("key") == "hash_mode", "حالتِ انتظار پاک شد"
         e.text("همه")                                   # مترادفِ فارسی، در همان حالتِ انتظار
         assert e.settings.hash_mode == "all"
-        e.tap("st:size_time_require_one_exact")
+        e.tap("sta:size_time_require_one_exact")
         e.text("0")
         assert e.settings.size_time_require_one_exact is False
         e.tap("st:reset")
