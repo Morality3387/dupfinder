@@ -155,6 +155,14 @@ FILTER_FA = {"all": "همه", "exact": "★★★★ قطعی", "sizetime": "★
 FILTERS = ["all", "exact", "sizetime", "name", "caption", "open"]
 
 
+_FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def fa_digits(x: Any) -> str:
+    """ارقامِ لاتین ⇒ فارسی (برای شمارهٔ گام‌ها و شمارنده‌های کوتاه)."""
+    return str(x).translate(_FA_DIGITS)
+
+
 def _num(x: Any) -> str:
     try:
         return "{:,}".format(int(x or 0))
@@ -163,6 +171,30 @@ def _num(x: Any) -> str:
 
 
 # ───────────────────────────── کیبوردها ─────────────────────────────
+
+def reply_kb(rows: List[List[Dict[str, Any]]], *, placeholder: str = "") -> Dict[str, Any]:
+    """کیبوردِ زیرِ کادرِ تایپ (ReplyKeyboard) — برای دکمهٔ «ارسالِ شمارهٔ من».
+
+    با one_time_keyboard بعد از یک‌بار استفاده خودش جمع می‌شود.
+    """
+    out: Dict[str, Any] = {"keyboard": rows, "resize_keyboard": True, "one_time_keyboard": True}
+    if placeholder:
+        out["input_field_placeholder"] = placeholder[:64]
+    return out
+
+
+def contact_btn(text: str = "📱 ارسالِ شمارهٔ من") -> Dict[str, Any]:
+    """دکمهٔ اشتراکِ شمارهٔ تماس (کاربر فقط یک‌بار می‌زند)."""
+    return {"text": text, "request_contact": True}
+
+
+def text_btn(text: str) -> Dict[str, Any]:
+    return {"text": text}
+
+
+def remove_kb() -> Dict[str, Any]:
+    return {"remove_keyboard": True}
+
 
 def kb(rows: List[List[Dict[str, str]]]) -> Dict[str, Any]:
     return {"inline_keyboard": rows}
