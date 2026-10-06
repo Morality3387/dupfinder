@@ -428,6 +428,7 @@ class BotApp:
             who = "\n👤 <b>%s</b> (@%s · <code>%s</code>)" % (esc(u.me.get("name") or ""), esc(u.me.get("username") or "—"),
                                                             u.me.get("id"))
         rows = [[R.btn("🔑 شروعِ ورود / تغییرِ حساب", "acc:login")],
+                [R.btn("🔧 تغییرِ api_id/api_hash", "acc:reset")],
                 [R.btn("📋 نمایشِ رشتهٔ سشن (SESSion)", "acc:session")],
                 [R.btn("🏠 منوی اصلی", "home")]]
         if getattr(u, "ready", False):
@@ -473,7 +474,7 @@ class BotApp:
             return
         await self.api.send_message(
             chat,
-            "🔑 <b>گام %d از %d</b> — <code>api_id</code> را بفرستید.\n"
+            "🔑 <b>گام %s از %s</b> — <code>api_id</code> را بفرستید.\n"
             "از <a href=\"https://my.telegram.org/apps\">my.telegram.org/apps</a> بگیرید (یک عدد است).\n"
             "<i>اگر در Variables سرویس گذاشته باشید، این گام‌ها پریده می‌شوند.</i>"
             % (R.fa_digits(p["step"]), R.fa_digits(total)),
@@ -511,9 +512,17 @@ class BotApp:
             code_hash = await self.user.send_code(p["phone"])
         except Exception as e:
             log.warning("send_code ناموفق: %s", e)
+            low = str(e).lower()
+            hint = ""
+            if "api_id" in low or "api_hash" in low or "api id" in low:
+                hint = ("\n<i>کلیدِ api اشتباه است — با «🔧 تغییرِ api_id/api_hash» پاکش کنید و "
+                        "از <a href=\"https://my.telegram.org/apps\">my.telegram.org</a> مقدارِ درست را بگذارید.</i>")
+            elif "flood" in low or "too many" in low or "wait" in low:
+                hint = "\n<i>تلگرام موقتاً محدود کرده؛ چند دقیقه بعد «🔁 تلاشِ دوباره».</i>"
             await self.api.send_message(
-                chat, "❌ ارسالِ کد ناموفق: <code>%s</code>" % esc(e),
-                kb=R.kb([[R.btn("🔁 تلاشِ دوباره", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+                chat, "❌ ارسالِ کد ناموفق: <code>%s</code>%s" % (esc(e), hint),
+                kb=R.kb([[R.btn("🔁 تلاشِ دوباره", "acc:resend"), R.btn("🔧 کلیدها", "acc:reset")],
+                         [R.btn("⛔️ انصراف", "acc:cancel")]]))
             return
         p["phone_code_hash"] = code_hash
         p["kind"] = "login_code"
@@ -915,6 +924,18 @@ class BotApp:
                     await self._login_resend(chat)
                 elif sub == "cancel":
                     await self._login_cancel(chat)
+                elif sub == "reset":
+                    self.pending.pop(chat, None)
+                    for k in ("api_id", "api_hash"):
+                        self.db.kv_set(k, 0 if k == "api_id" else "")
+                    self.settings.api_id = 0
+                    self.settings.api_hash = ""
+                    self.user.api_id = 0
+                    self.user.api_hash = ""
+                    await self.api.send_message(
+                        chat, "🔧 کلیدهای <code>api_id</code>/<code>api_hash</code> پاک شد.\n"
+                              "اکنون یا در Variables سرویس بگذارید، یا با «🔑 شروعِ ورود» از اول وارد کنید.",
+                        kb=R.kb([[R.btn("🔑 شروعِ ورود", "acc:login")], [R.btn("🏠 منوی اصلی", "home")]]))
                 elif sub == "session":
                     s = self.user.session_string or ""
                     if not s:
