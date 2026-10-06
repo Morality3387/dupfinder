@@ -1,0 +1,842 @@
+"""رباتِ تلگرام: منوها، جادوگرِ افزودنِ کانال، اسکن با نوارِ درصد، گزارش و فوروارد."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+
+from . import matching as M
+from . import report as R
+from . import similarity as S
+from .config import LABELS, Settings
+from .scanner import Progress, ScanResult, Scanner
+from .tg_api import TgError, esc
+from .user_client import looks_like_phone
+
+log = logging.getLogger("dup.bot")
+
+HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکراریِ کانال</b>
+
+<b>کارِ ربات:</b> کانال‌های شما را می‌خواند، همهٔ ویدیوها را ایندکس می‌کند و تکراری‌ها را با سه اولویت پیدا می‌کند:
+ ۱) <b>نامِ فایل</b> — بیشترین شباهت را اول می‌بیند
+ ۲) <b>کپشن</b> — متنِ پستِ ویدیو
+ ۳) <b>حجم + زمانِ ویدیو</b> — مثلِ «دو فایلِ ۵۰ مگ و ۱ دقیقه» (تمرکزِ اصلی روی همین حالت)
+➕ <b>هشِ محتوا</b> (اثرِ انگشتِ خودِ فایل) برای تأییدِ قطعی — با دانلودِ ۳ تکهٔ کوچک، نه کلِ فایل.
+
+<b>گام‌به‌گام:</b>
+۱) «📡 کانال‌های من» ← «➕ افزودنِ کانال» ← یوزرنیم/لینک بفرستید یا یک پست از کانال برایم <b>فوروارد</b> کنید (بات باید در کانال ادمین باشد).
+۲) روی نامِ کانال بزنید ← «🔍 اسکن کامل».
+۳) نوارِ درصد، تعدادِ پیام‌ها و فایل‌های پیداشده را زنده می‌بینید. هر وقت خواستید «⏹ توقف و کنسل».
+۴) نتیجه: گروه‌های تکراری با دلیلِ تشخیص؛ هر گروه را با <b>فوروارد</b> به همین چت می‌فرستم تا با یک کلیک بپَرید روی همان پستِ کانال و تصمیم بگیرید.
+
+⚠️ <b>ربات هیچ‌چیز را پاک/ویرایش نمی‌کند</b> — فقط می‌خواند و فوروارد می‌کند. تصمیمِ پاک‌کردن کاملاً با شماست.
+
+🔎 <b>دربارهٔ دیدنِ تاریخچهٔ کامل:</b> ربات‌های معمولی (Bot API) از پست‌های <b>قبل از ادمین‌شدن‌شان</b> هیچ اطلاعی ندارند؛ در گروه‌ها هم فقط پیام‌های بعد از اضافه‌شدن. برای «<b>کلِ تاریخچه</b>» باید یک <b>حسابِ کاربری</b> وصل شود (همان حسابِ ادمینِ کانال یا یک اکانتِ مخصوصِ کار) — با دستورِ «🔑 اتصالِ حسابِ کاربری». آن‌وقت ربات از اولین پستِ کانال تا آخرین را می‌بیند. راهِ جایگزین اگر حساب نمی‌دهید: پست‌های قدیمی را در یک کانالِ آرشیو فوروارد کنید و همان را اسکن کنیم.
+"""
+
+
+class BotApp:
+    def __init__(self, api, db, settings: Settings, user=None, *,
+                 scanner_factory: Optional[Callable[..., Scanner]] = None,
+                 reporter: Optional[R.Reporter] = None):
+        self.api = api
+        self.db = db
+        self.settings = settings
+        self.user = user
+        self.reporter = reporter or R.Reporter(api, user, max_per_group=settings.max_forward_per_group)
+        self._scanner_factory = scanner_factory or (lambda **kw: Scanner(db, user, self.cfg_dict, **kw))
+        self.bot_username = ""
+        self.owner_id = int(settings.owner_id or 0)
+        self.pending: Dict[int, Dict[str, Any]] = {}
+        self.scan: Optional[Dict[str, Any]] = None
+        self._scan_lock = asyncio.Lock()
+        self._offset = int(db.kv_get("tg_offset", 0) or 0)
+        self._cmds_set = False
+        self.started_at = int(time.time())
+
+    # ── دسترسی ──
+    def cfg_dict(self) -> Dict[str, Any]:
+        d = self.settings.as_public()
+        d.update({k: getattr(self.settings, k) for k in ("hash_mode", "media_kinds")})
+        return d
+
+    async def is_owner(self, uid: int) -> bool:
+        if not self.owner_id:
+            self.owner_id = int(uid)
+            self.db.kv_set("owner_id", self.owner_id)
+            return True
+        return int(uid) == int(self.owner_id)
+
+    # ═════════════════════ حلقهٔ اصلی ═════════════════════
+    async def run(self) -> None:
+        try:
+            me = await self.api.get_me()
+            self.bot_username = str(me.get("username") or "")
+        except Exception as e:
+            log.error("getMe ناموفق: %s", e)
+        await self._set_commands()
+        log.info("ربات آماده است (@%s)", self.bot_username)
+        while True:
+            try:
+                updates = await self.api.get_updates(self._offset, timeout=25)
+            except Exception as e:
+                log.warning("getUpdates خطا: %s", e)
+                await asyncio.sleep(3)
+                continue
+            for u in updates:
+                self._offset = max(self._offset, int(u.get("update_id", 0)) + 1)
+                try:
+                    await self.handle_update(u)
+                except Exception as e:
+                    log.exception("خطا در پردازشِ آپدیت: %s", e)
+            if updates:
+                self.db.kv_set("tg_offset", self._offset)
+
+    async def _set_commands(self) -> None:
+        cmds = [{"command": "start", "description": "🏠 منوی اصلی"},
+                {"command": "channels", "description": "📡 کانال‌های من"},
+                {"command": "scanall", "description": "🔍 اسکنِ همهٔ کانال‌ها"},
+                {"command": "cancel", "description": "⏹ توقفِ اسکن"},
+                {"command": "history", "description": "🔎 تاریخچهٔ کامل (راهنما)"},
+                {"command": "help", "description": "❓ راهنما"}]
+        try:
+            await self.api.set_my_commands(cmds)
+            self._cmds_set = True
+        except Exception:
+            pass
+
+    # ═════════════════════ ورودی‌ها ═════════════════════
+    async def handle_update(self, u: Dict[str, Any]) -> None:
+        if "callback_query" in u:
+            await self.handle_callback(u["callback_query"])
+        elif "message" in u:
+            await self.handle_message(u["message"])
+        elif "channel_post" in u:
+            pass  # پستِ کانال‌ها نادیده (فقط به‌عنوانِ منبعِ اسکن مهم‌اند)
+
+    async def handle_message(self, m: Dict[str, Any]) -> None:
+        chat = int(m.get("chat", {}).get("id", 0))
+        uid = int(m.get("from", {}).get("id", chat) or chat)
+        text = str(m.get("text") or "").strip()
+        if not await self.is_owner(uid):
+            await self.api.send_message(chat, "⛔️ این ربات خصوصی است.")
+            return
+        # پیامِ فورواردشده از کانال ⇒ افزودنِ سریعِ کانال
+        fwd = self._forwarded_chat(m)
+        if fwd and (not text or text.startswith("/")):
+            await self._add_channel_from_forward(chat, fwd)
+            return
+        # حالتِ انتظار برای مقدار (افزودنِ کانال/تنظیمات/ورود)
+        p = self.pending.get(chat)
+        if p and text and not text.startswith("/"):
+            if p["kind"] == "add_channel":
+                await self._add_channel_from_text(chat, text, m)
+                return
+            if p["kind"] == "setting":
+                await self._apply_setting(chat, p["key"], text)
+                return
+            if p["kind"].startswith("login_"):
+                await self._login_step(chat, p, text, m)
+                return
+        if text.startswith("/"):
+            await self.handle_command(chat, uid, text, m)
+            return
+        # متنِ آزاد
+        if text:
+            await self._menu_main(chat, uid, m)
+
+    @staticmethod
+    def _forwarded_chat(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        o = m.get("forward_origin") or {}
+        if o.get("type") == "channel" and o.get("chat"):
+            c = o["chat"]
+            return {"id": c.get("id"), "title": c.get("title") or "", "username": c.get("username") or ""}
+        if o.get("type") == "chat" and o.get("sender_chat"):
+            c = o["sender_chat"]
+            return {"id": c.get("id"), "title": c.get("title") or "", "username": c.get("username") or ""}
+        fc = m.get("forward_from_chat")
+        if fc:
+            return {"id": fc.get("id"), "title": fc.get("title") or "", "username": fc.get("username") or ""}
+        return None
+
+    async def handle_command(self, chat: int, uid: int, text: str, m: Dict[str, Any]) -> None:
+        cmd = text.split()[0].lower().lstrip("/").split("@")[0]
+        arg = text[len(text.split()[0]):].strip()
+        if cmd == "start":
+            if not self._cmds_set:                      # 🩹 اگر در استارتاپ نشد، همین‌جا تلاش دوباره
+                await self._set_commands()
+            if arg.startswith("card_"):
+                await self.api.send_message(chat, "این کارت مخصوصِ رباتِ پنل است.")
+                return
+            await self._menu_main(chat, uid, m)
+        elif cmd in ("help", "history"):
+            await self.api.send_message(chat, HELP_TEXT, kb=R.kb([[R.btn("🏠 منوی اصلی", "home")]]))
+        elif cmd in ("channels", "ch"):
+            await self._channels_menu(chat)
+        elif cmd in ("scanall", "scan_all"):
+            await self._start_scan_for_all(chat)
+        elif cmd in ("cancel", "stop"):
+            await self._cancel_scan(chat)
+        elif cmd in ("id",):
+            await self.api.send_message(chat, "🆔 chat_id: <code>%d</code> · user_id: <code>%d</code>" % (chat, uid))
+        elif cmd in ("status", "diag"):
+            st = self.db.stats()
+            lines = ["📈 <b>وضعیت</b>",
+                     "کانال‌ها: <b>%s</b>" % st["channels"],
+                     "فایل‌های ایندکس‌شده: <b>%s</b>" % "{:,}".format(st["files"]),
+                     "هش‌شده: <b>%s</b>" % "{:,}".format(st["hashed"]),
+                     "اسکن‌ها: <b>%s</b> · گروه‌های تکراری: <b>%s</b>" % (st["scans"], st["groups"]),
+                     "حسابِ کاربری: %s" % ("✅ وصل" if getattr(self.user, "ready", False) else "❌ وصل نیست"),
+                     "اسکنِ جاری: %s" % ("⏳ بله" if (self.scan and not self.scan.get("done")) else "—")]
+            await self.api.send_message(chat, "\n".join(lines))
+        elif cmd in ("setsession",):
+            await self._save_session_from_text(chat, arg)
+        else:
+            await self._menu_main(chat, uid, m)
+
+    # ═════════════════════ منوها ═════════════════════
+    async def _menu_main(self, chat: int, uid: int, m: Optional[Dict[str, Any]] = None) -> None:
+        self.pending.pop(chat, None)
+        st = self.db.stats()
+        acc = "✅ وصل" if getattr(self.user, "ready", False) else "❌ وصل نیست"
+        scanning = "⏳ یک اسکن در جریان است" if (self.scan and not self.scan.get("done")) else "آماده"
+        text = ("🏠 <b>منوی اصلی</b>\n\n"
+                "📡 کانال‌ها: <b>%s</b> · 🎬 فایل‌ها: <b>%s</b>\n"
+                "🔁 گروه‌های تکراریِ یافته‌شده: <b>%s</b>\n"
+                "🔑 حسابِ کاربری (برای تاریخچهٔ کامل): %s\n"
+                "⚙️ وضعیت: %s\n\n"
+                "<i>ربات فقط می‌خواند و فوروارد می‌کند — هیچ‌چیزی پاک نمی‌شود.</i>") % (
+            st["channels"], "{:,}".format(st["files"]), "{:,}".format(st["groups"]), acc, scanning)
+        rows = [[R.btn("📡 کانال‌های من", "ch:list"), R.btn("➕ افزودنِ کانال", "ch:add")],
+                [R.btn("🔑 اتصالِ حسابِ کاربری", "acc:menu"), R.btn("⚙️ تنظیمات", "st:menu")],
+                [R.btn("❓ راهنما", "help")]]
+        if self.scan and not self.scan.get("done"):
+            rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
+        if m:
+            await self.api.send_message(chat, text, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, text, kb=R.kb(rows))
+
+    async def _channels_menu(self, chat: int) -> None:
+        chans = self.db.list_channels()
+        if not chans:
+            await self.api.send_message(
+                chat,
+                "📡 هنوز کانالی اضافه نشده.\n\n"
+                "روی «➕ افزودنِ کانال» بزنید و یکی از این‌ها را بفرستید:\n"
+                "• <code>@username</code> کانال\n• لینک <code>https://t.me/username</code>\n"
+                "• یا یک پست از کانال را برایم <b>فوروارد</b> کنید\n\n"
+                "⚠️ یادتان باشد ربات باید در کانال <b>ادمین</b> باشد.",
+                kb=R.kb([[R.btn("➕ افزودنِ کانال", "ch:add")], [R.btn("🏠 منوی اصلی", "home")]]))
+            return
+        rows: List[List[Dict[str, str]]] = []
+        for c in chans:
+            last = self.db.last_scan(int(c["id"]))
+            mark = "🆕" if not last else ("⏹" if last.get("status") == "canceled" else
+                                          ("⚠️" if last.get("status") == "error" else "✅"))
+            rows.append([R.btn("%s %s" % (mark, (c.get("title") or c.get("username") or c["tg_id"])[:40]),
+                               "c:%d" % int(c["id"]))])
+        rows.append([R.btn("➕ افزودنِ کانال", "ch:add"), R.btn("🔍 اسکنِ همه", "scan:all")])
+        rows.append([R.btn("🏠 منوی اصلی", "home")])
+        await self.api.send_message(
+            chat, "📡 <b>کانال‌های شما</b> (<b>%d</b>)\n\nروی هر کانال بزنید تا اسکن کنید و نتیجه را ببینید." % len(chans),
+            kb=R.kb(rows))
+
+    async def _channel_view(self, chat: int, cid: int, edit: Optional[int] = None) -> None:
+        c = self.db.get_channel(cid)
+        if not c:
+            await self.api.send_message(chat, "این کانال پیدا نشد.")
+            return
+        last = self.db.last_scan(cid)
+        files = self.db.count_files(cid)
+        state = "—"
+        if last:
+            state = "%s · %s فایل · %s گروه" % (
+                {"done": "✅ کامل", "canceled": "⏹ کنسل‌شده", "error": "⚠️ خطا", "running": "⏳"}.get(
+                    last.get("status"), last.get("status")),
+                "{:,}".format(int(last.get("files_found") or 0)), "{:,}".format(int(last.get("groups_found") or 0)))
+        text = ("📡 <b>%s</b>\n🔗 %s\n🆔 <code>%s</code>\n\n"
+                "🎬 فایل‌های ایندکس‌شده: <b>%s</b>\n📊 آخرین اسکن: %s") % (
+            esc(c.get("title") or "بدون نام"), esc("@" + (c.get("username") or "—")),
+            str(c.get("tg_id")), "{:,}".format(files), state)
+        rows = [[R.btn("🔍 اسکن کامل (تاریخچهٔ کامل)", "scan:full:%d" % cid)],
+                [R.btn("🔄 ادامهٔ اسکن (فقط جدیدها)", "scan:cont:%d" % cid)]]
+        if last:
+            rows.append([R.btn("📊 نتیجهٔ آخرین اسکن", "s:%d:%d" % (int(last["id"]), cid)),
+                         R.btn("🔁 گروه‌های تکراری", "l:%d:%d:all:0" % (int(last["id"]), cid))])
+        if self.scan and not self.scan.get("done"):
+            rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
+        rows.append([R.btn("🗑 حذف از فهرست", "ch:del:%d" % cid), R.btn("⬅️ کانال‌ها", "ch:list")])
+        if edit:
+            await self.api.edit_message_text(chat, edit, text, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, text, kb=R.kb(rows))
+
+    # ═════════════════════ افزودنِ کانال ═════════════════════
+    async def _ask_add_channel(self, chat: int) -> None:
+        self.pending[chat] = {"kind": "add_channel"}
+        await self.api.send_message(
+            chat,
+            "➕ <b>افزودنِ کانال</b>\n\n"
+            "یکی از این‌ها را بفرستید:\n"
+            "• <code>@username</code>\n• لینک <code>https://t.me/username</code>\n"
+            "• شناسهٔ عددی مثل <code>-1001234567890</code>\n"
+            "• یا یک <b>پستِ فورواردشده</b> از همان کانال\n\n"
+            "⚠️ ربات باید در کانال <b>ادمین</b> باشد (برای فوروارد). برای دیدنِ <b>کلِ تاریخچه</b> هم «🔑 اتصالِ حسابِ کاربری» را انجام دهید.",
+            kb=R.kb([[R.btn("⬅️ کانال‌ها", "ch:list")]]))
+
+    async def _add_channel_from_forward(self, chat: int, fwd: Dict[str, Any]) -> None:
+        tg_id = int(fwd.get("id") or 0)
+        await self._register_channel(chat, tg_id, fwd.get("username") or "", fwd.get("title") or "")
+
+    async def _add_channel_from_text(self, chat: int, text: str, m: Dict[str, Any]) -> None:
+        t = text.strip()
+        tg_id = 0
+        username = ""
+        if "t.me/+" in t or "telegram.me/+" in t or t.startswith("+"):
+            await self.api.send_message(
+                chat,
+                "⚠️ لینکِ دعوتِ خصوصی (<code>+</code>) پشتیبانی نمی‌شود.\n"
+                "یک پست از کانال را برایم <b>فوروارد</b> کنید، یا <code>@username</code> یا شناسهٔ عددی بفرستید.")
+            return
+        mm = re.search(r"(?:t\.me|telegram\.me)/(?:c/)?([A-Za-z0-9_]+)", t)
+        if mm and not t.startswith("-"):
+            username = mm.group(1)
+        elif t.startswith("@"):
+            username = t.lstrip("@")
+        elif t.startswith("-") or t.lstrip("-").isdigit():
+            try:
+                tg_id = int(t)
+            except Exception:
+                tg_id = 0
+        title = ""
+        if not tg_id and username:
+            try:
+                info = await self.api.get_chat("@" + username)
+                tg_id = int(info.get("id") or 0)
+                title = info.get("title") or ""
+            except Exception as e:
+                await self.api.send_message(chat, "❌ کانال پیدا نشد یا ربات عضو نیست: <code>%s</code>" % esc(e))
+                return
+        if not tg_id:
+            await self.api.send_message(chat, "❌ ورودی نامعتبر. یوزرنیم/لینک/شناسه یا پستِ فورواردشده بفرستید.")
+            return
+        await self._register_channel(chat, tg_id, username, title)
+
+    async def _register_channel(self, chat: int, tg_id: int, username: str, title: str) -> None:
+        # بررسیِ ادمین‌بودنِ ربات (اگر ممکن باشد) — فقط برای اطلاع، مانعِ افزودن نمی‌شود
+        bot_admin = None
+        try:
+            me = await self.api.get_me()
+            st = await self.api.get_chat_member(tg_id, int(me.get("id") or 0))
+            bot_admin = str(st.get("status") or "") in ("administrator", "creator")
+        except Exception:
+            bot_admin = None
+        kind = "channel"
+        # اگر حسابِ کاربری وصل است، عنوان/یوزرنیمِ دقیق + نوع را از آن بگیر
+        if not title and getattr(self.user, "ready", False):
+            try:
+                info = await self.user.resolve(tg_id if tg_id else ("@" + username))
+                if info:
+                    title = info.get("title") or title
+                    username = info.get("username") or username
+                    kind = info.get("kind") or kind
+            except Exception:
+                pass
+        cid = self.db.add_channel(tg_id, title or username or str(tg_id), username, kind)
+        self.pending.pop(chat, None)
+        warn = ""
+        if bot_admin is False:
+            warn = "\n⚠️ ربات در این کانال <b>ادمین نیست</b> — اسکن کار می‌کند ولی فوروارد/خواندنِ پست‌های قدیمی محدود می‌شود."
+        await self.api.send_message(
+            chat, "✅ کانال ذخیره شد: <b>%s</b> (<code>%s</code>)%s\n\nحالا اسکن را شروع کنیم؟" % (
+                esc(title or username or str(tg_id)), tg_id, warn),
+            kb=R.kb([[R.btn("🔍 اسکن کامل", "scan:full:%d" % cid)],
+                     [R.btn("📡 کانال‌ها", "ch:list")]]))
+
+    # ═════════════════════ تنظیمات ═════════════════════
+    async def _settings_menu(self, chat: int) -> None:
+        s = self.settings
+        rows: List[List[Dict[str, str]]] = []
+        for k in ("hash_mode", "th_name_ratio", "th_name_jaccard", "th_cap_ratio", "th_cap_jaccard",
+                  "size_tol_pct", "dur_tol_s", "max_forward_per_group", "media_kinds"):
+            rows.append([R.btn("⚙️ %s: %s" % (LABELS.get(k, k), getattr(s, k)), "st:%s" % k)])
+        rows.append([R.btn("♻️ بازگشت به پیش‌فرض", "st:reset"), R.btn("🏠 منوی اصلی", "home")])
+        await self.api.send_message(
+            chat,
+            "⚙️ <b>تنظیماتِ تطبیق</b>\n\n"
+            "• <b>حالتِ هش</b>: <code>candidates</code> = فقط نامزدها (سریع) · <code>all</code> = همه (کند) · <code>off</code>\n"
+            "• <b>آستانه‌ها</b>: هرچه کمتر، حساس‌تر (تکراریِ بیشتر) و ریسکِ اشتباه بیشتر.\n"
+            "• <b>حجم/زمان</b>: تلورانسِ حجم به درصد و تلورانسِ زمان به ثانیه.\n\n"
+            "برای تغییر، روی هر مورد بزنید و مقدارِ تازه را بفرستید.",
+            kb=R.kb(rows))
+
+    async def _ask_setting(self, chat: int, key: str) -> None:
+        self.pending[chat] = {"kind": "setting", "key": key}
+        cur = getattr(self.settings, key)
+        hint = {"hash_mode": "off یا candidates یا all",
+                "media_kinds": "video یا video+doc یا all",
+                "size_time_require_one_exact": "1/روشن = یکی از حجم یا زمان باید دقیقاً برابر باشد · 0/خاموش = فقط نزدیک بودن کافی است"}.get(key, "یک عدد")
+        await self.api.send_message(chat, "⚙️ مقدارِ تازهٔ <b>%s</b> را بفرستید.\nمقدارِ فعلی: <code>%s</code>\n(%s)" % (
+            LABELS.get(key, key), cur, hint))
+
+    async def _apply_setting(self, chat: int, key: str, value: str) -> None:
+        self.pending.pop(chat, None)
+        v = value.strip()
+        if key == "hash_mode" and v not in ("off", "candidates", "all"):
+            await self.api.send_message(chat, "❌ فقط off / candidates / all")
+            return
+        if key == "media_kinds" and v not in ("video", "video+doc", "all"):
+            await self.api.send_message(chat, "❌ فقط video / video+doc / all")
+            return
+        try:
+            cur = getattr(self.settings, key)
+            if isinstance(cur, bool):
+                v2: Any = str(v).strip().lower() in ("1", "true", "yes", "on", "روشن", "بله", "درست")
+            elif isinstance(cur, int):
+                v2 = int(float(v))
+            elif isinstance(cur, float):
+                v2 = float(v)
+            else:
+                v2 = v
+        except Exception:
+            await self.api.send_message(chat, "❌ مقدار نامعتبر.")
+            return
+        setattr(self.settings, key, v2)
+        self.db.kv_set("setting:" + key, v2)
+        await self.api.send_message(chat, "✅ ذخیره شد: <b>%s</b> = <code>%s</code>" % (LABELS.get(key, key), v2),
+                                    kb=R.kb([[R.btn("⚙️ تنظیمات", "st:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+
+    # ═════════════════════ ورودِ حسابِ کاربری ═════════════════════
+    async def _account_menu(self, chat: int) -> None:
+        u = self.user
+        status = "✅ وصل" if getattr(u, "ready", False) else "❌ وصل نیست"
+        who = ""
+        if getattr(u, "ready", False) and getattr(u, "me", None):
+            who = "\n👤 <b>%s</b> (@%s · <code>%s</code>)" % (esc(u.me.get("name") or ""), esc(u.me.get("username") or "—"),
+                                                            u.me.get("id"))
+        rows = [[R.btn("🔑 شروعِ ورود / تغییرِ حساب", "acc:login")],
+                [R.btn("📋 نمایشِ رشتهٔ سشن (SESSion)", "acc:session")],
+                [R.btn("🏠 منوی اصلی", "home")]]
+        if getattr(u, "ready", False):
+            rows.insert(0, [R.btn("🔌 تستِ اتصال", "acc:test"), R.btn("⛔️ قطعِ اتصال", "acc:logout")])
+        await self.api.send_message(
+            chat,
+            "🔑 <b>حسابِ کاربری (برای تاریخچهٔ کامل)</b>\n\n"
+            "وضعیت: %s%s\n\n"
+            "با Bot API نمی‌شود پست‌های قبل از ادمین‌شدنِ ربات را دید. با یک حسابِ کاربری (MTProto) "
+            "کلِ تاریخچه خوانده می‌شود و ربات می‌تواند از اولین پست اسکن کند.\n\n"
+            "🔒 نکته‌های امنیتی: از <b>کدِ ورود و رمزِ دو مرحله‌ای</b> فقط برای همین ورود استفاده می‌شود و "
+            "هیچ‌جا ذخیره نمی‌شود؛ فقط «رشتهٔ سشن» در دیتابیسِ سرویس می‌ماند (قابلِ لغو از "
+            "Telegram → Devices)." % (status, who),
+            kb=R.kb(rows))
+
+    async def _login_start(self, chat: int) -> None:
+        self.pending[chat] = {"kind": "login_api_id"}
+        await self.api.send_message(
+            chat,
+            "🔑 <b>گام ۱ از ۴</b> — <code>api_id</code> را بفرستید.\n"
+            "از <a href=\"https://my.telegram.org/apps\">my.telegram.org/apps</a> بگیرید (یک عدد است).\n"
+            "اگر قبلاً سشن دارید، می‌توانید از «📋 نمایشِ رشتهٔ سشن» استفاده کنید.",
+            kb=R.kb([[R.btn("⛔️ انصراف", "acc:menu")]]))
+
+    async def _login_step(self, chat: int, p: Dict[str, Any], text: str, m: Dict[str, Any]) -> None:
+        kind = p["kind"]
+        if kind == "login_api_id":
+            if not text.isdigit():
+                await self.api.send_message(chat, "❌ api_id باید عدد باشد.")
+                return
+            p["api_id"] = int(text)
+            p["kind"] = "login_api_hash"
+            self.settings.api_id = p["api_id"]
+            await self.api.send_message(chat, "🔑 <b>گام ۲ از ۴</b> — <code>api_hash</code> را بفرستید (۳۲ نویسه).")
+            await self._try_delete(chat, m.get("message_id"))
+            return
+        if kind == "login_api_hash":
+            if len(text.strip()) < 20:
+                await self.api.send_message(chat, "❌ api_hash نامعتبر.")
+                return
+            p["api_hash"] = text.strip()
+            p["kind"] = "login_phone"
+            self.settings.api_hash = p["api_hash"]
+            await self._try_delete(chat, m.get("message_id"))
+            await self.api.send_message(chat, "🔑 <b>گام ۳ از ۴</b> — شمارهٔ حساب را با کدِ کشور بفرستید (مثلِ <code>+98912…</code>).")
+            return
+        if kind == "login_phone":
+            if not looks_like_phone(text):
+                await self.api.send_message(chat, "❌ شماره نامعتبر.")
+                return
+            p["phone"] = text.strip()
+            self.settings.api_hash = p["api_hash"]
+            try:
+                self.user.api_id = p["api_id"]
+                self.user.api_hash = p["api_hash"]
+                code_hash = await self.user.send_code(p["phone"])
+            except Exception as e:
+                await self.api.send_message(chat, "❌ ارسالِ کد ناموفق: <code>%s</code>" % esc(e))
+                self.pending.pop(chat, None)
+                return
+            p["phone_code_hash"] = code_hash
+            p["kind"] = "login_code"
+            self.db.kv_set("api_id", p["api_id"])
+            self.db.kv_set("api_hash", p["api_hash"])
+            await self._try_delete(chat, m.get("message_id"))
+            await self.api.send_message(chat, "🔑 <b>گام ۴ از ۴</b> — کدِ پیامک/تلگرام را بفرستید "
+                                             "(می‌توانید با فاصله بنویسید: <code>1 2 3 4 5</code>).\n"
+                                             "⏱ کد چند دقیقه اعتبار دارد.")
+            return
+        if kind == "login_code":
+            await self._try_delete(chat, m.get("message_id"))
+            res = await self.user.sign_in(p["phone"], text, p.get("phone_code_hash") or "")
+            if res.get("ok"):
+                self.pending.pop(chat, None)
+                self.db.kv_set("session_string", self.user.session_string)
+                await self.api.send_message(chat, "✅ حساب وصل شد: <b>%s</b>\nاز این پس «🔍 اسکن کامل» کلِ تاریخچه را می‌خواند." % (
+                    esc((self.user.me or {}).get("name") or "")),
+                    kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")], [R.btn("🏠 منوی اصلی", "home")]]))
+                return
+            if res.get("need_password"):
+                p["kind"] = "login_password"
+                await self.api.send_message(chat, "🔐 این حساب رمزِ دو مرحله‌ای دارد. رمز را بفرستید "
+                                                 "(بعد از ذخیره، پیامِ شما را پاک می‌کنم).")
+                return
+            await self.api.send_message(chat, "❌ ورود ناموفق: <code>%s</code>\nدوباره /start و «🔑 اتصالِ حساب»." % esc(res.get("error")))
+            self.pending.pop(chat, None)
+            return
+        if kind == "login_password":
+            await self._try_delete(chat, m.get("message_id"))
+            res = await self.user.sign_in_password(text)
+            self.pending.pop(chat, None)
+            if res.get("ok"):
+                self.db.kv_set("session_string", self.user.session_string)
+                await self.api.send_message(chat, "✅ رمز پذیرفته شد و حساب وصل است.",
+                                            kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")], [R.btn("🏠 منوی اصلی", "home")]]))
+            else:
+                await self.api.send_message(chat, "❌ رمز اشتباه: <code>%s</code>" % esc(res.get("error")))
+            return
+
+    async def _save_session_from_text(self, chat: int, text: str) -> None:
+        s = text.strip()
+        if len(s) < 50:
+            await self.api.send_message(chat, "❌ رشتهٔ سشن نامعتبر. مثال: <code>/setsession 1BVtsOK…</code>")
+            return
+        self.user.session_string = s
+        self.db.kv_set("session_string", s)
+        ok = await self.user.start()
+        await self.api.send_message(chat, "✅ ذخیره شد. اتصال: %s" % ("برقرار ✅" if ok else "ناموفق ❌"))
+
+    async def _try_delete(self, chat: int, msg_id: Optional[int]) -> None:
+        """حذفِ پیامِ خودِ کاربر در چتِ ربات (برای پاک‌کردنِ کد/رمز). فقط در چتِ همین ربات."""
+        if not msg_id:
+            return
+        try:
+            await self.api.delete_message(chat, int(msg_id))
+        except Exception:
+            pass
+
+    # ═════════════════════ اسکن ═════════════════════
+    async def _start_scan_for_all(self, chat: int) -> None:
+        chans = self.db.list_channels()
+        if not chans:
+            await self._channels_menu(chat)
+            return
+        await self.api.send_message(chat, "🔍 اسکنِ %d کانال پشتِ‌سرهم شروع می‌شود…" % len(chans))
+        for c in chans:
+            await self._start_scan(chat, int(c["id"]), full=False, wait=True)
+
+    async def _start_scan(self, chat: int, cid: int, *, full: bool, wait: bool = False) -> None:
+        c = self.db.get_channel(cid)
+        if not c:
+            await self.api.send_message(chat, "کانال پیدا نشد.")
+            return
+        if self.scan and not self.scan.get("done"):
+            await self.api.send_message(chat, "⏳ یک اسکن در جریان است. اول «⏹ توقف» را بزنید یا تمام شود.")
+            return
+        if not getattr(self.user, "ready", False):
+            await self.api.send_message(
+                chat,
+                "⚠️ برای دیدنِ <b>کلِ تاریخچهٔ کانال</b> باید حسابِ کاربری وصل باشد.\n"
+                "بدونِ آن، رباتِ معمولی فقط پست‌های بعد از ادمین‌شدنش را می‌بیند.\n\n"
+                "• «🔑 اتصالِ حسابِ کاربری» را بزنید (۳۰ ثانیه کار دارد)، یا\n"
+                "• اگر می‌خواهید فعلاً بدونِ آن اسکن کنید، دکمهٔ زیر را بزنید.",
+                kb=R.kb([[R.btn("🔑 اتصالِ حساب", "acc:login")],
+                         [R.btn("⚠️ اسکنِ محدود (بدونِ حساب)", "scan:limited:%d" % cid)],
+                         [R.btn("⬅️ کانال", "c:%d" % cid)]]))
+            return
+        if self._scan_lock.locked():
+            await self.api.send_message(chat, "⏳ یک اسکن دیگر در جریان است.")
+            return
+        msg = await self.api.send_message(chat, R.progress_text("index", c.get("title") or "", 0.0), kb=R.progress_kb())
+        self.scan = {"chat_id": chat, "msg_id": int(msg.get("message_id") or 0), "done": False,
+                     "channel": c, "cid": cid, "full": full, "started": time.time()}
+
+        async def on_progress(p: Progress) -> None:
+            if self.scan and not self.scan.get("done"):
+                try:
+                    await self.api.edit_message_text(chat, self.scan["msg_id"],
+                        R.progress_text(p.phase, c.get("title") or "", p.pct, seen=p.seen, total=p.total,
+                                        files=p.files, hashed=p.hashed, hash_total=p.hash_total, note=p.note),
+                        kb=R.progress_kb() if p.phase not in ("done", "canceled", "error") else None)
+                except TgError:
+                    pass
+
+        scanner = self._scanner_factory(on_progress=on_progress)
+        self.scan["scanner"] = scanner
+
+        async def runner() -> None:
+            async with self._scan_lock:
+                res: ScanResult = await scanner.run(c, full=full)
+            await self._finish_scan(res, c)
+
+        self.scan["task"] = asyncio.create_task(runner())
+        if wait:
+            try:
+                await self.scan["task"]
+            except Exception:
+                pass
+
+    async def _finish_scan(self, res: ScanResult, c: Dict[str, Any]) -> None:
+        sc = self.scan or {}
+        self.scan = dict(sc, done=True, result=res)
+        chat = int(sc.get("chat_id") or 0)
+        scan = self.db.get_scan(res.scan_id) or {}
+        counts = {
+            "exact": self.db.count_groups(res.scan_id, signal="exact"),
+            "sizetime": self.db.count_groups(res.scan_id, signal="sizetime"),
+            "name": self.db.count_groups(res.scan_id, signal="name"),
+            "caption": self.db.count_groups(res.scan_id, signal="caption"),
+        }
+        head = {"done": "✅ اسکن تمام شد", "canceled": "⏹ اسکن کنسل شد", "error": "⚠️ خطا در اسکن"}.get(res.status, res.status)
+        txt = "%s\n\n%s" % (head, R.scan_summary_text(scan, c, counts,
+                                                       total_indexed=self.db.count_files(int(c["id"]))))
+        rows = []
+        if res.groups:
+            rows.append([R.btn("🔁 دیدنِ %d گروهِ تکراری" % res.groups, "l:%d:%d:all:0" % (res.scan_id, res.channel_id))])
+        rows.append([R.btn("🔍 اسکن مجدد", "scan:full:%d" % res.channel_id), R.btn("📡 کانال", "c:%d" % res.channel_id)])
+        rows.append([R.btn("🏠 منوی اصلی", "home")])
+        try:
+            await self.api.edit_message_text(chat, int(sc.get("msg_id") or 0), txt, kb=R.kb(rows))
+        except Exception:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+        if chat:
+            await self.api.send_chat_action(chat, "typing")
+        if self.scan and self.scan.get("task") and not self.scan["task"].done():
+            pass
+
+    async def _cancel_scan(self, chat: int) -> None:
+        if not self.scan or self.scan.get("done"):
+            await self.api.send_message(chat, "ℹ️ اسکنی در جریان نیست.")
+            return
+        sc = self.scan.get("scanner")
+        if sc:
+            sc.cancel()
+        await self.api.send_message(chat, "⏹ درخواستِ توقف فرستاده شد…")
+
+    async def _scan_limited(self, chat: int, cid: int) -> None:
+        """اسکنِ محدود با Bot API (بدونِ حسابِ کاربری): فقط پست‌های در دسترسِ ربات."""
+        c = self.db.get_channel(cid)
+        if not c:
+            return
+        await self.api.send_message(chat, "⚠️ حالتِ محدود فعلاً در این نسخه پیاده‌سازی نشده. "
+                                         "برای دیدنِ کلِ تاریخچه حسابِ کاربری را وصل کنید (🔑).")
+
+    # ═════════════════════ نتیجه‌ها ═════════════════════
+    async def _summary(self, chat: int, scan_id: int, cid: int, edit: Optional[int] = None) -> None:
+        scan = self.db.get_scan(scan_id)
+        c = self.db.get_channel(cid)
+        if not scan or not c:
+            await self.api.send_message(chat, "اسکن پیدا نشد.")
+            return
+        counts = {"exact": self.db.count_groups(scan_id, signal="exact"),
+                  "sizetime": self.db.count_groups(scan_id, signal="sizetime"),
+                  "name": self.db.count_groups(scan_id, signal="name"),
+                  "caption": self.db.count_groups(scan_id, signal="caption")}
+        txt = R.scan_summary_text(scan, c, counts, total_indexed=self.db.count_files(cid))
+        rows = [[R.btn("🔁 دیدنِ گروه‌ها", "l:%d:%d:all:0" % (scan_id, cid))],
+                [R.btn("🔍 اسکن مجدد", "scan:full:%d" % cid), R.btn("📡 کانال", "c:%d" % cid)]]
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+    async def _groups_list(self, chat: int, scan_id: int, cid: int, filt: str, page: int,
+                           edit: Optional[int] = None) -> None:
+        kw: Dict[str, Any] = {}
+        if filt == "exact":
+            kw["signal"] = "exact"
+        elif filt in ("sizetime", "name", "caption"):
+            kw["signal"] = filt
+        if filt == "open":
+            kw["only_open"] = True
+        groups = self.db.groups_of_scan(scan_id, **kw)
+        ps = max(1, int(self.settings.page_size or 8))
+        pages = max(1, (len(groups) + ps - 1) // ps)
+        page = max(0, min(page, pages - 1))
+        chunk = groups[page * ps: (page + 1) * ps]
+        c = self.db.get_channel(cid) or {}
+        txt = R.groups_page_text(c, chunk, page, pages, filt, len(groups))
+        keyboard = R.groups_kb(cid, scan_id, filt, page, pages, chunk)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=keyboard)
+        else:
+            await self.api.send_message(chat, txt, kb=keyboard)
+
+    async def _group_view(self, chat: int, scan_id: int, cid: int, filt: str, page: int, gid: int,
+                          edit: Optional[int] = None) -> None:
+        g = self.db.get_group(gid)
+        c = self.db.get_channel(cid)
+        if not g or not c:
+            await self.api.send_message(chat, "گروه پیدا نشد.")
+            return
+        members = self.db.group_members(gid)
+        txt = R.group_detail_text(c, g, members)
+        keyboard = R.group_kb(cid, scan_id, filt, page, gid)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=keyboard)
+        else:
+            await self.api.send_message(chat, txt, kb=keyboard)
+
+    async def _forward_group(self, chat: int, scan_id: int, cid: int, filt: str, page: int, gid: int,
+                             offset: int = 0) -> None:
+        g = self.db.get_group(gid)
+        c = self.db.get_channel(cid)
+        if not g or not c:
+            return
+        members = self.db.group_members(gid)
+        await self.api.send_chat_action(chat, "upload_document")
+        res = await self.reporter.forward_group(chat, c, members, offset=offset)
+        self.db.log_action("forward", "group=%s sent=%s" % (gid, res["sent"]))
+        lines = ["📎 <b>فورواردِ گروه #%s</b>" % gid,
+                 "فرستاده‌شده: <b>%s</b> از <b>%s</b>" % (res["sent"], res["total"])]
+        if res["failed"]:
+            lines.append("⚠️ ناموفق: <code>%s</code> (محتوا محافظت‌شده یا حذف‌شده — لینک‌ها را از دکمهٔ «🔗 لینکِ پیام‌ها» بگیرید)" % (
+                ",".join(str(x) for x in res["failed"])))
+        if res["remaining"]:
+            lines.append("🕘 <b>%d</b> فایلِ دیگر مانده — دکمهٔ ادامه را بزنید." % res["remaining"])
+        else:
+            lines.append("✅ همهٔ فایل‌های این گروه فرستاده شد. با کلیک روی هر پیام، همان پستِ کانال باز می‌شود.")
+        rows = []
+        if res["remaining"]:
+            rows.append([R.btn("📎 ادامه (%d فایلِ بعدی)" % min(self.reporter.max_per_group, res["remaining"]),
+                               "f2:%d:%d:%s:%d:%d:%d" % (scan_id, cid, filt, page, gid, res["offset"]))])
+        rows.append([R.btn("🔗 لینکِ پیام‌ها", "u:%d:%d:%d" % (scan_id, cid, gid)),
+                     R.btn("⬅️ گروه", "g:%d:%d:%s:%d:%d" % (scan_id, cid, filt, page, gid))])
+        await self.api.send_message(chat, "\n".join(lines), kb=R.kb(rows))
+
+    # ═════════════════════ کال‌بک‌ها ═════════════════════
+    async def handle_callback(self, cq: Dict[str, Any]) -> None:
+        data = str(cq.get("data") or "")
+        msg = cq.get("message") or {}
+        chat = int((msg.get("chat") or {}).get("id") or 0)
+        mid = int(msg.get("message_id") or 0)
+        uid = int((cq.get("from") or {}).get("id") or 0)
+        cq_id = str(cq.get("id") or "")
+        await self.api.answer_callback(cq_id)
+        if not await self.is_owner(uid):
+            await self.api.answer_callback(cq_id, "⛔️ دسترسی ندارید", alert=True)
+            return
+        try:
+            parts = data.split(":")
+            op = parts[0] if parts else ""
+            if data == "home" or op == "home":
+                await self._menu_main(chat, uid)
+            elif op == "help":
+                await self.api.send_message(chat, HELP_TEXT, kb=R.kb([[R.btn("🏠 منوی اصلی", "home")]]))
+            elif op == "ch":
+                sub = parts[1] if len(parts) > 1 else "list"
+                if sub == "list":
+                    await self._channels_menu(chat)
+                elif sub == "add":
+                    await self._ask_add_channel(chat)
+                elif sub == "del":
+                    cid = int(parts[2])
+                    self.db.delete_channel(cid)
+                    await self.api.send_message(chat, "🗑 از فهرستِ ربات حذف شد (هیچ فایلی در تلگرام پاک نشد).",
+                                                kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")]]))
+            elif op == "c":
+                await self._channel_view(chat, int(parts[1]))
+            elif op == "acc":
+                sub = parts[1] if len(parts) > 1 else "menu"
+                if sub == "menu":
+                    await self._account_menu(chat)
+                elif sub == "login":
+                    await self._login_start(chat)
+                elif sub == "session":
+                    s = self.user.session_string or ""
+                    if not s:
+                        await self.api.send_message(chat, "سشنی ذخیره نشده.")
+                    else:
+                        await self.api.send_message(
+                            chat,
+                            "📋 رشتهٔ سشن (برای متغیرِ محیطی <code>TG_SESSION_STRING</code> یا استفادهٔ مجدد):\n"
+                            "<code>%s</code>\n\n⚠️ این رشته مثلِ رمز است — جایی که دیگران می‌بینند نگه ندارید." % esc(s))
+                elif sub == "test":
+                    ok = await self.user.start()
+                    await self.api.send_message(chat, "اتصال: %s" % ("✅ برقرار" if ok else "❌ ناموفق — " + esc(getattr(self.user, "last_error", ""))))
+                elif sub == "logout":
+                    self.user.session_string = ""
+                    self.db.kv_set("session_string", "")
+                    await self.user.stop()
+                    await self.api.send_message(chat, "⛔️ اتصال قطع شد (برای لغوِ کامل، از Telegram → Devices هم خارج شوید).")
+            elif op == "st":
+                key = parts[1] if len(parts) > 1 else ""
+                if key == "menu":
+                    await self._settings_menu(chat)
+                elif key == "reset":
+                    self.db.kv_set("setting:reset", 1)
+                    defaults = Settings()
+                    for k in LABELS:
+                        setattr(self.settings, k, getattr(defaults, k))
+                        self.db.kv_set("setting:" + k, getattr(defaults, k))
+                    await self.api.send_message(chat, "♻️ تنظیمات به پیش‌فرض برگشت.", kb=R.kb([[R.btn("⚙️ تنظیمات", "st:menu")]]))
+                elif key in LABELS:
+                    await self._ask_setting(chat, key)
+            elif op == "scan":
+                sub = parts[1]
+                if sub == "cancel":
+                    await self._cancel_scan(chat)
+                elif sub == "all":
+                    await self._start_scan_for_all(chat)
+                elif sub == "full":
+                    await self._start_scan(chat, int(parts[2]), full=True)
+                elif sub == "cont":
+                    await self._start_scan(chat, int(parts[2]), full=False)
+                elif sub == "limited":
+                    await self._scan_limited(chat, int(parts[2]))
+            elif op == "s":
+                await self._summary(chat, int(parts[1]), int(parts[2]), edit=mid)
+            elif op in ("l", "p"):
+                scan_id, cid, filt = int(parts[1]), int(parts[2]), parts[3]
+                page = int(parts[4]) if len(parts) > 4 else 0
+                await self._groups_list(chat, scan_id, cid, filt, page, edit=mid)
+            elif op == "g":
+                scan_id, cid, filt, page, gid = int(parts[1]), int(parts[2]), parts[3], int(parts[4]), int(parts[5])
+                await self._group_view(chat, scan_id, cid, filt, page, gid, edit=mid)
+            elif op == "f":
+                scan_id, cid, filt, page, gid = int(parts[1]), int(parts[2]), parts[3], int(parts[4]), int(parts[5])
+                await self._forward_group(chat, scan_id, cid, filt, page, gid, offset=0)
+            elif op == "f2":
+                scan_id, cid, filt, page, gid, off = (int(parts[1]), int(parts[2]), parts[3], int(parts[4]),
+                                                      int(parts[5]), int(parts[6]))
+                await self._forward_group(chat, scan_id, cid, filt, page, gid, offset=off)
+            elif op == "u":
+                scan_id, cid, gid = int(parts[1]), int(parts[2]), int(parts[3])
+                c = self.db.get_channel(cid) or {}
+                members = self.db.group_members(gid)
+                await self.api.send_message(chat, R.links_text(c, members),
+                                            kb=R.kb([[R.btn("⬅️ گروه", "g:%d:%d:all:0:%d" % (scan_id, cid, gid))]]))
+            elif op == "m":
+                scan_id, cid, gid, state = int(parts[1]), int(parts[2]), int(parts[3]), parts[4]
+                self.db.set_group_state(gid, "done" if state == "done" else "ignored")
+                await self.api.answer_callback(cq_id, "✅ ثبت شد")
+                await self._group_view(chat, scan_id, cid, "all", 0, gid, edit=mid)
+            elif op == "nop":
+                pass
+        except Exception as e:
+            log.exception("خطا در کال‌بک %s", data)
+            try:
+                await self.api.send_message(chat, "⚠️ خطا: <code>%s</code>" % esc(e))
+            except Exception:
+                pass
