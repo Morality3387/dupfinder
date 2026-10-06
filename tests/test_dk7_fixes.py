@@ -199,7 +199,8 @@ def test_owner_bootstrap_requires_claim_code():
         e.text("/claim %s" % code, uid=99)
         assert e.bot.owner_id == 99 and e.db.kv_get("owner_id") == 99
         e.text("/start", uid=7)                            # نفرِ بعدی مالک قبلی را نمی‌گیرد
-        assert e.bot.owner_id == 99 and "خصوصی" in e.last()
+        assert e.bot.owner_id == 99 and "خصوصی" in e.last_to(111)      # به غریبه
+        assert e.msg_to(99, "درخواستِ دسترسی")                          # اعلانِ مالک
         e.close()
 
 
