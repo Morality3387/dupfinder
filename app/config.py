@@ -34,6 +34,7 @@ LABELS: Dict[str, str] = {
     "th_name_jaccard": "آستانهٔ شباهتِ نام (توکن)",
     "th_cap_ratio": "آستانهٔ شباهتِ کپشن (نسبت)",
     "th_cap_jaccard": "آستانهٔ شباهتِ کپشن (توکن)",
+    "min_caption_len": "حداقلِ طولِ کپشن برای مقایسه (نویسه؛ پیش‌فرض ۱۲)",
     "size_tol_pct": "تلورانسِ حجم (٪)",
     "size_tol_min": "تلورانسِ حجم (حداقل بایت)",
     "dur_tol_s": "تلورانسِ زمانِ ویدیو (ثانیه)",
@@ -48,6 +49,8 @@ LABELS: Dict[str, str] = {
     "duration_dense_window": "پنجرهٔ حجمی داخل سبدِ زمانِ پُر (تعدادِ همسایه)",
     "exhaustive_pairs": "بررسیِ کاملِ جفت‌ها (بدونِ سقف — کندتر ولی هیچ جفتی جا نمی‌ماند)",
     "incr_tail": "بازخوانیِ چند پیامِ آخر در اسکنِ ادامه‌ای (برای پست‌های ویرایش‌شده)",
+    "cluster_mode": "حالتِ گروه‌بندی: loose (زنجیره‌ای) یا strict (هر عضو با همهٔ اعضا شبیه باشد)",
+    "prune_missing": "در اسکنِ کامل، رکوردِ فایل‌های حذف‌شده از کانال از ایندکس پاک شود",
     "hash_full_max_mb": "سقفِ حجم برای هشِ کامل (مگابایت)",
     "preview_pages": "تعدادِ صفحه در اسکنِ محدود (هر صفحه ~۲۰ پست)",
     "preview_delay": "مکثِ بین صفحه‌های اسکنِ محدود (ثانیه)",
@@ -71,6 +74,7 @@ class Settings:
     th_name_jaccard: float = field(default_factory=lambda: _env_float("TH_NAME_JACCARD", 0.60))
     th_cap_ratio: float = field(default_factory=lambda: _env_float("TH_CAP_RATIO", 0.80))
     th_cap_jaccard: float = field(default_factory=lambda: _env_float("TH_CAP_JACCARD", 0.60))
+    min_caption_len: int = field(default_factory=lambda: _env_int("MIN_CAPTION_LEN", 12))
     size_tol_pct: float = field(default_factory=lambda: _env_float("SIZE_TOL_PCT", 0.5))
     size_tol_min: int = field(default_factory=lambda: _env_int("SIZE_TOL_MIN", 2048))
     dur_tol_s: float = field(default_factory=lambda: _env_float("DUR_TOL_S", 2.0))
@@ -87,6 +91,10 @@ class Settings:
     exhaustive_pairs: bool = field(default_factory=lambda: _env_bool("EXHAUSTIVE_PAIRS", False))
     # اسکنِ ادامه‌ای از `max_msg_id - incr_tail` می‌خواند تا پست‌های **ویرایش‌شده** هم دیده شوند
     incr_tail: int = field(default_factory=lambda: _env_int("INCR_TAIL", 200))
+    # گروه‌بندی: `loose` (پیش‌فرض؛ Union-Find گذرا + نشانهٔ زنجیره‌ای) یا `strict` (هر عضو با همه)
+    cluster_mode: str = field(default_factory=lambda: (_env("CLUSTER_MODE", "loose") or "loose").lower())
+    # در اسکنِ کامل، رکوردِ فایل‌هایی که کاربر در تلگرام پاک کرده از ایندکسِ ربات حذف شود
+    prune_missing: bool = field(default_factory=lambda: _env_bool("PRUNE_MISSING", True))
     # ── اسکنِ محدود (بدونِ حسابِ کاربری، از پیش‌نمایشِ عمومیِ t.me/s) ──
     preview_pages: int = field(default_factory=lambda: _env_int("PREVIEW_PAGES", 6))
     owner_claim_code: str = field(default_factory=lambda: _env("OWNER_CLAIM_CODE"))
