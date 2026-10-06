@@ -67,7 +67,9 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 ادمین‌ها «تنظیمات»، اسکن، گزارش و فوروارد را دارند؛ فقط «حسابِ کاربری» (سشنِ تلگرامِ مالک)،
 «مدیریتِ ادمین‌ها» و «حذفِ کانال از فهرست» در دستِ مالک است.
 
-⚙️ <b>تنظیمات:</b> از منوی اصلی («⚙️ تنظیمات») یا دستورِ <code>/settings</code>. تغییرِ متنی:
+⚙️ <b>تنظیمات:</b> از منوی اصلی («⚙️ تنظیمات») یا دستورِ <code>/settings</code>. نمی‌دانید هر گزینه
+چیست؟ روی همان گزینه بزنید تا <b>توضیحِ کاملِ فارسی</b> + مقدارهای پیشنهادی بیاید، یا «❓ هر گزینه یعنی چه؟»
+را بزنید (یا <code>/settings راهنما</code>). مقدارها با یک کلیک عوض می‌شوند. تغییرِ متنی:
 <code>/set کلید مقدار</code> — مثلاً <code>/set hash_scope full</code> · <code>/set گروه‌بندی سخت‌گیرانه</code>.
 مقدارهای فارسی هم قبول است («کامل»، «همه»، «خاموش/روشن») و ارقامِ فارسی («۰.۶») هم کار می‌کند.
 
@@ -79,6 +81,159 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 
 
 # ═══════════ نرمال‌سازیِ مقدارهای تنظیمات (پذیرشِ فارسی، ارقامِ فارسی، مترادف‌ها) ═══════════
+# ═══════════ توضیحِ فارسیِ هر تنظیم (برای اینکه معلوم باشد هر دکمه چه کار می‌کند) ═══════════
+# ساختارِ هر مورد:  icon · title (برچسبِ کوتاهِ دکمه) · what (این گزینه چیست) · tip (نکته)
+#   options = مقدارهای «گزینه‌ای»: (مقدارِ ذخیره‌شده، برچسب، توضیحِ یک‌خطی)
+#   presets = مقدارهای عددیِ پیشنهادی: (مقدار، برچسب، توضیحِ یک‌خطی)
+SETTING_INFO: Dict[str, Dict[str, Any]] = {
+    "hash_mode": {
+        "icon": "🔑", "title": "حالتِ هش",
+        "what": "برای تأییدِ قطعیِ «این دو فایل یکی‌اند»، ربات چند تکهٔ کوچک از فایل را دانلود می‌کند و "
+                "«اثرِ انگشت» (هش) می‌سازد. این گزینه می‌گوید برای کدام فایل‌ها این کار انجام شود.",
+        "options": [("off", "خاموش", "هیچ دانلودی نمی‌کند؛ فقط با نام/کپشن/حجم/زمان تشخیص می‌دهد (سریع‌ترین)"),
+                    ("candidates", "فقط نامزدها (توصیه‌شده)", "فقط فایل‌هایی که با نام/حجم/زمان مشکوک‌اند دانلود می‌شوند"),
+                    ("all", "همه", "همهٔ فایل‌ها دانلود می‌شوند (کند و پُرترافیک)")],
+        "tip": "اگر کنارِ گروه‌ها «⭐⭐⭐⭐ تأییدِ قطعی» نمی‌بینید، این را <code>candidates</code> و "
+               "«🔑 دامنهٔ هش» را <code>full</code> بگذارید.",
+    },
+    "hash_scope": {
+        "icon": "🔑", "title": "دامنهٔ هش",
+        "what": "از هر فایل چه چیزی هش شود: فقط چند تکهٔ کوچک یا کلِ فایل. هرچه بیشتر، دقیق‌تر ولی کندتر.",
+        "options": [("sample", "نمونه (سریع)", "۳ تکهٔ سر/میانه/ته — در گزارش «نشانهٔ قوی»"),
+                    ("full", "کامل (قطعی)", "کلِ فایل — کندتر؛ در گزارش «تأییدِ قطعی»")],
+        "tip": "برای کانال‌های حجیم اول <code>sample</code> بگذارید و فقط برای گروه‌های مشکوک <code>full</code> کنید. "
+               "حداکثر حجمِ این کار با <code>hash_full_max_mb</code> محدود می‌شود.",
+    },
+    "media_kinds": {
+        "icon": "📥", "title": "چه فایل‌هایی اسکن شود",
+        "what": "ربات از کانال چه نوع فایل‌هایی را ایندکس کند (ویدیو، سند، عکس…).",
+        "options": [("video", "فقط ویدیو", "سریع‌ترین؛ فقط فیلم‌ها بررسی می‌شوند"),
+                    ("video+doc", "ویدیو + سند", "فیلم‌ها و فایل‌های PDF/زیپ و…"),
+                    ("all", "همه", "هر فایلِ مدیادار (عکس و صدا هم)")],
+        "tip": "با عوض‌کردنِ این گزینه، اسکنِ بعدی <b>خودکار کامل</b> می‌شود تا فایل‌های قدیمیِ نوعِ تازه هم دیده شوند.",
+    },
+    "cluster_mode": {
+        "icon": "🧩", "title": "سختگیریِ گروه‌بندی",
+        "what": "وقتی A شبیه B و B شبیه C است، آیا هر سه یک گروه می‌شوند؟ این گزینه تصمیم می‌گیرد.",
+        "options": [("loose", "زنجیره‌ای (پیش‌فرض)", "همه در یک گروه؛ اگر واقعاً یکی نباشند با نشانِ 🔗 مشخص می‌شوند"),
+                    ("strict", "سخت‌گیرانه", "هر عضو باید با همهٔ اعضای گروه شبیه باشد (گروه‌های کوچک‌تر ولی مطمئن‌تر)")],
+        "tip": "اگر می‌خواهید <b>همهٔ</b> اعضای یک گروه واقعاً با هم تکراری باشند، <code>strict</code> را انتخاب کنید.",
+    },
+    "max_forward_per_group": {
+        "icon": "📎", "title": "سقفِ فوروارد در هر گروه",
+        "what": "هنگامِ «📤 فورواردِ همهٔ تکراری‌ها»، از هر گروه حداکثر چند فایل به چتِ شما فرستاده شود.",
+        "presets": [("5", "۵ فایل", "برای گروه‌های شلوغ، چتِ شما کمتر پُر می‌شود"),
+                    ("12", "۱۲ فایل (پیش‌فرض)", "تعادل"),
+                    ("25", "۲۵ فایل", "وقتی می‌خواهید همه را یک‌جا ببینید")],
+        "tip": "این سقف جلوی اسپم‌شدنِ چت را می‌گیرد؛ بقیهٔ فایل‌ها در گزارشِ گروه با لینک در دسترس‌اند.",
+    },
+    "th_name_ratio": {
+        "icon": "🎯", "title": "حساسیتِ نامِ فایل",
+        "what": "نامِ فایل باید حداقل این‌قدر شبیه باشد تا «تکراری» حساب شود (بین ۰ و ۱). "
+                "کوچک‌تر ⇒ حساسِ بیشتر؛ بزرگ‌تر ⇒ سخت‌گیرِ بیشتر.",
+        "presets": [("0.6", "حساس‌تر", "تکراریِ بیشتر پیدا می‌شود، ریسکِ اشتباه هم بیشتر"),
+                    ("0.82", "پیش‌فرض", "تعادلِ مناسبِ بیشتر کانال‌ها"),
+                    ("0.95", "سخت‌گیرتر", "فقط نام‌های تقریباً یکسان")],
+        "tip": "اگر تکراری‌های واضح از دستتان می‌رود، ۰.۷ را امتحان کنید؛ اگر اشتباهِ زیاد می‌بینید، بالا ببرید.",
+    },
+    "th_name_jaccard": {
+        "icon": "🎯", "title": "حساسیتِ نام (کلمه‌ای)",
+        "what": "شباهتِ کلمه‌به‌کلمهٔ نام (مثلِ «فیلم ۱» و «فیلم ۲») بین ۰ و ۱ — مکملِ گزینهٔ بالاست.",
+        "presets": [("0.5", "حساس‌تر", "کلماتِ مشترکِ کمتر هم کافی است"),
+                    ("0.6", "پیش‌فرض", "تعادل"),
+                    ("0.8", "سخت‌گیرتر", "باید تقریباً همهٔ کلمات یکی باشند")],
+    },
+    "th_cap_ratio": {
+        "icon": "🎯", "title": "حساسیتِ کپشن",
+        "what": "متنِ پست (کپشن) باید حداقل این‌قدر شبیه باشد تا سیگنالِ تکراری‌بودن حساب شود (۰ تا ۱).",
+        "presets": [("0.6", "حساس‌تر", "کپشن‌های شبیه هم زودتر سیگنال می‌شوند"),
+                    ("0.8", "پیش‌فرض", "تعادل"),
+                    ("0.95", "سخت‌گیرتر", "فقط کپشن‌های تقریباً یکسان")],
+        "tip": "کپشن‌های عمومیِ کوتاه (مثلِ «فیلم اول») عمداً سیگنال نیستند تا اشتباه پیش نیاید — "
+               "با «🎯 حداقلِ طولِ کپشن» می‌توانید این حد را کم کنید.",
+    },
+    "th_cap_jaccard": {
+        "icon": "🎯", "title": "حساسیتِ کپشن (کلمه‌ای)",
+        "what": "شباهتِ کلمه‌به‌کلمهٔ کپشن بین ۰ و ۱ — مکملِ گزینهٔ بالاست.",
+        "presets": [("0.5", "حساس‌تر", ""), ("0.6", "پیش‌فرض", ""), ("0.8", "سخت‌گیرتر", "")],
+    },
+    "min_caption_len": {
+        "icon": "🎯", "title": "حداقلِ طولِ کپشن",
+        "what": "کپشن‌های کوتاه‌تر از این تعداد نویسه نادیده گرفته می‌شوند (تا کپشنِ تکراریِ «فیلم» همه را تکراری نکند).",
+        "presets": [("8", "۸ نویسه", "فقط کپشن‌های خیلی کوتاه نادیده می‌مانند (حساسیتِ بیشتر)"),
+                    ("12", "۱۲ نویسه (پیش‌فرض)", "تعادل"),
+                    ("25", "۲۵ نویسه", "فقط کپشن‌های بلند سیگنال‌اند (اشتباهِ کمتر)")],
+        "tip": "پایین‌آوردنِ این عدد ریسکِ «مثبتِ کاذب» را زیاد می‌کند؛ محتاطانه تغییر دهید.",
+    },
+    "size_tol_pct": {
+        "icon": "📏", "title": "اختلافِ حجم (٪)",
+        "what": "چند درصد اختلاف در حجمِ دو فایل قابلِ قبول است (۰ = دقیقاً برابر).",
+        "presets": [("0", "دقیقاً برابر", "بدونِ هیچ اغماضی؛ سخت‌گیرترین حالت"),
+                    ("0.5", "۰.۵٪ (پیش‌فرض)", "تعادل"),
+                    ("2", "۲٪", "اگر فایل‌های هم‌محتوا حجمشان کمی فرق دارد"),
+                    ("5", "۵٪", "پرتسامح‌ترین حالت (ریسکِ اشتباهِ بیشتر)")],
+        "tip": "«📏 حجم یا زمانِ دقیق» تعیین می‌کند آیا همین تلورانس کافی است یا باید یکی دقیقاً برابر باشد.",
+    },
+    "size_tol_min": {
+        "icon": "📏", "title": "اختلافِ حجم (بایت)",
+        "what": "اختلافِ کمتر از این مقدار (بایت) نادیده گرفته می‌شود؛ مثلاً ۱ مگابایت = 1048576.",
+        "presets": [("0", "صفر", "هیچ اغماضی در حجمِ کوچک نیست"),
+                    ("2048", "۲ کیلوبایت (پیش‌فرض)", "تعادل"),
+                    ("1048576", "۱ مگابایت", "برای فایل‌های بزرگ مناسب است")],
+    },
+    "dur_tol_s": {
+        "icon": "⏱", "title": "اختلافِ زمان (ثانیه)",
+        "what": "چند ثانیه اختلاف در مدتِ ویدیو قابلِ قبول است.",
+        "presets": [("1", "۱ ثانیه", "سخت‌گیرتر"), ("2", "۲ ثانیه (پیش‌فرض)", "تعادل"),
+                    ("5", "۵ ثانیه", "وقتی ویدیوها برشِ کوچک خورده‌اند")],
+    },
+    "min_duration_s": {
+        "icon": "⏱", "title": "حداقلِ زمانِ ویدیو",
+        "what": "ویدیوهای کوتاه‌تر از این (ثانیه) اصلاً بررسی نمی‌شوند (مثلِ کلیپ‌های چندثانیه‌ای که تکراری‌شان "
+                "اهمیتی ندارد).",
+        "presets": [("0", "بدونِ محدودیت", "همهٔ ویدیوها بررسی می‌شوند"),
+                    ("3", "۳ ثانیه (پیش‌فرض)", "تعادل"), ("30", "۳۰ ثانیه", "فقط ویدیوهای جدی")],
+    },
+    "size_time_require_one_exact": {
+        "icon": "📏", "title": "حجم یا زمانِ دقیق",
+        "what": "برای اطمینانِ بیشتر: آیا حتماً باید یکی از دو مورد (حجم یا زمان) دقیقاً برابر باشد؟",
+        "options": [("1", "روشن (پیش‌فرض)", "حداقل یکی دقیقاً برابر — اشتباهِ کمتر"),
+                    ("0", "خاموش", "نزدیک‌بودنِ هر دو هم کافی است — تکراریِ بیشتر، ریسکِ بیشتر")],
+    },
+    "prune_missing": {
+        "icon": "🗑", "title": "رکوردهای حذف‌شده",
+        "what": "اگر فایلی را در تلگرام حذف کرده باشید، در «اسکنِ کامل» رکوردش از دیتابیسِ ربات هم پاک شود؟",
+        "options": [("1", "روشن (پیش‌فرض)", "ایندکس تمیز می‌ماند و گروه‌ها به فایلِ نبوده اشاره نمی‌کنند"),
+                    ("0", "خاموش", "رکوردها می‌مانند (گروه‌ها ممکن است فایلِ حذف‌شده نشان دهند)")],
+        "tip": "این کار <b>هیچ‌وقت</b> چیزی را در تلگرام پاک نمی‌کند — فقط دیتابیسِ خودِ ربات تمیز می‌شود.",
+    },
+    "incr_tail": {
+        "icon": "🔄", "title": "بازخوانیِ پیام‌های آخر",
+        "what": "در «🔄 ادامهٔ اسکن» (فقط جدیدها)، چند پیامِ آخرِ کانال دوباره خوانده شود تا پستِ "
+                "ویرایش‌شده/فایلِ عوض‌شده از دست نرود.",
+        "presets": [("50", "۵۰ پیام", "سبک‌تر و سریع‌تر"),
+                    ("200", "۲۰۰ پیام (پیش‌فرض)", "تعادل"),
+                    ("500", "۵۰۰ پیام", "برای کانال‌هایی که زیاد ویرایش می‌شوند")],
+        "tip": "این عدد روی «اسکنِ کامل» اثری ندارد (آن همیشه از اول می‌خواند).",
+    },
+}
+
+# دسته‌بندیِ منو: (عنوانِ سرگروه، کلیدها) — ترتیب همان‌طور که دیده می‌شود
+SETTING_GROUPS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("🔑 تشخیص و هش", ("hash_mode", "hash_scope")),
+    ("🎯 حساسیتِ تشخیص (آستانه‌ها)", ("th_name_ratio", "th_name_jaccard",
+                                      "th_cap_ratio", "th_cap_jaccard", "min_caption_len")),
+    ("📏 حجم و زمان", ("size_tol_pct", "size_tol_min", "dur_tol_s", "min_duration_s",
+                       "size_time_require_one_exact")),
+    ("🧩 گروه‌بندی", ("cluster_mode",)),
+    ("📥 اسکن و ایندکس", ("media_kinds", "incr_tail", "prune_missing")),
+    ("📎 فوروارد به چتِ شما", ("max_forward_per_group",)),
+]
+
+# برچسبِ کوتاهِ هر کلید = عنوانِ همان توضیح (برای `/set` و دکمه‌ها)
+SHORT_LABELS = {k: str(v.get("title") or k) for k, v in SETTING_INFO.items()}
+
+
 def _squash(v: str) -> str:
     """نرمال‌سازیِ سخت‌گیرانه: بدونِ فاصله/نیم‌فاصله/اعراب + یکسان‌سازیِ حروفِ عربی/فارسی.
 
@@ -134,20 +289,6 @@ VALUE_HELP: Dict[str, str] = {
     "size_time_require_one_exact": "1/روشن = یکی از حجم یا زمان باید دقیقاً برابر باشد · 0/خاموش = فقط نزدیک بودن",
     "incr_tail": "یک عدد = چند پیامِ آخر در اسکنِ ادامه‌ای بازخوانی شود (پیش‌فرض ۲۰۰)",
 }
-
-# برچسبِ کوتاهِ دکمه‌ها (برچسبِ کاملِ LABELS در متنِ توضیح می‌آید)
-SHORT_LABELS: Dict[str, str] = {
-    "hash_mode": "حالتِ هش", "hash_scope": "دامنهٔ هش",
-    "th_name_ratio": "نام/نسبت", "th_name_jaccard": "نام/توکن",
-    "th_cap_ratio": "کپشن/نسبت", "th_cap_jaccard": "کپشن/توکن",
-    "size_tol_pct": "تلورانسِ حجم٪", "size_tol_min": "تلورانسِ حجم/بایت",
-    "dur_tol_s": "تلورانسِ زمان", "min_duration_s": "حداقلِ زمان",
-    "max_forward_per_group": "سقفِ فوروارد/گروه", "media_kinds": "نوعِ فایل",
-    "cluster_mode": "گروه‌بندی", "min_caption_len": "حداقلِ کپشن",
-    "prune_missing": "پاک‌سازیِ حذف‌شده‌ها", "size_time_require_one_exact": "حجم/زمانِ دقیق",
-    "incr_tail": "بازخوانیِ آخر",
-}
-
 
 class BotApp:
     def __init__(self, api, db, settings: Settings, user=None, *,
@@ -555,7 +696,10 @@ class BotApp:
                      "اسکنِ جاری: %s" % ("⏳ بله" if (self.scan and not self.scan.get("done")) else "—")]
             await self.api.send_message(chat, "\n".join(lines))
         elif cmd in ("settings", "st", "config"):
-            await self._settings_menu(chat)
+            if _squash(arg).startswith("guide") or "راهنما" in arg or "توضیح" in arg:
+                await self._settings_guide(chat)
+            else:
+                await self._settings_menu(chat)
         elif cmd in ("set", "setting"):
             await self._apply_setting_text(chat, arg)
         elif cmd in ("admins", "admin"):
@@ -1056,43 +1200,156 @@ class BotApp:
                 kb=R.kb([[R.btn("🔁 تلاشِ دوباره", "adm:%d" % cid)], [R.btn("⬅️ کانال", "c:%d" % cid)]]))
 
     # ═════════════════════ تنظیمات ═════════════════════
+    # ── توضیحِ هر تنظیم: عنوان/چیستی/گزینه‌ها/نکته ──
+    @staticmethod
+    def _setting_default(key: str) -> Any:
+        try:
+            return getattr(Settings(), key)
+        except Exception:
+            return "—"
+
+    @staticmethod
+    def _setting_info(key: str) -> Dict[str, Any]:
+        return SETTING_INFO.get(key) or {}
+
+    def _setting_display(self, key: str) -> str:
+        """مقدارِ فعلی به شکلِ خوانا: True/False ⇒ «روشن/خاموش» (نه اصطلاحِ انگلیسی)."""
+        v = getattr(self.settings, key, "—")
+        if isinstance(v, bool):
+            return "روشن" if v else "خاموش"
+        return str(v)
+
+    def _setting_choices(self, key: str) -> List[Tuple[str, str, str]]:
+        """مقدارهای پیشنهادی برای دکمه‌ها: [(مقدار، برچسب، توضیح)]."""
+        info = self._setting_info(key)
+        return list(info.get("options") or info.get("presets") or [])
+
     def _setting_rows(self) -> List[List[Dict[str, str]]]:
-        """ردیف‌های دکمهٔ تنظیمات با **برچسبِ کوتاه** (ریسکِ رد‌شدنِ دکمه‌های بلند را ندارد)."""
-        keys = ("hash_mode", "hash_scope", "media_kinds", "cluster_mode", "min_caption_len",
-                "th_name_ratio", "th_name_jaccard", "th_cap_ratio", "th_cap_jaccard",
-                "size_tol_pct", "size_tol_min", "dur_tol_s", "min_duration_s",
-                "max_forward_per_group", "prune_missing", "size_time_require_one_exact", "incr_tail")
-        pairs = [("⚙️ %s: %s" % (SHORT_LABELS.get(k, LABELS.get(k, k)), getattr(self.settings, k)), "st:%s" % k)
-                 for k in keys if hasattr(self.settings, k)]
+        """منوی تنظیمات: دسته‌بندی‌شده، دوستونه، با برچسبِ فارسیِ کوتاه + مقدارِ فعلی."""
         rows: List[List[Dict[str, str]]] = []
-        for i in range(0, len(pairs), 2):                      # دو ستون ⇒ اسکرولِ کمتر
-            rows.append([R.btn(t, c) for t, c in pairs[i:i + 2]])
-        rows.append([R.btn("♻️ بازگشت به پیش‌فرض", "st:reset"), R.btn("🏠 منوی اصلی", "home")])
+        for group, keys in SETTING_GROUPS:
+            rows.append([R.btn(group, "nop:")])          # سرگروه (غیرِکلیک‌شدنی)
+            pairs: List[Tuple[str, str]] = []
+            for k in keys:
+                if k not in SETTING_INFO or not hasattr(self.settings, k):
+                    continue
+                info = SETTING_INFO[k]
+                pairs.append(("%s %s: %s" % (info.get("icon", "⚙️"), info.get("title", k),
+                                             self._setting_display(k)), "st:%s" % k))
+            for i in range(0, len(pairs), 2):
+                rows.append([R.btn(t, c) for t, c in pairs[i:i + 2]])
+        rows.append([R.btn("❓ هر گزینه یعنی چه؟ (راهنمای کامل)", "st:guide")])
+        rows.append([R.btn("♻️ بازگشتِ همه به پیش‌فرض", "st:reset"), R.btn("🏠 منوی اصلی", "home")])
         return rows
 
     async def _settings_menu(self, chat: int) -> None:
         text = ("⚙️ <b>تنظیماتِ تطبیق</b>\n\n"
-                "<b>مقدارهای مجاز (فارسی هم قبول است):</b>\n"
-                "• حالتِ هش: <code>candidates</code> (نامزدها/سریع) · <code>all</code> (همه/کند) · <code>off</code> (خاموش)\n"
-                "• دامنهٔ هش: <code>sample</code> (نمونه/سریع) · <code>full</code> (کامل/قطعی)\n"
-                "• نوعِ فایل: <code>video</code> · <code>video+doc</code> · <code>all</code> (همه)\n"
-                "• گروه‌بندی: <code>loose</code> (زنجیره‌ای) · <code>strict</code> (سخت‌گیرانه)\n"
-                "• بله/خیر: <code>1</code>/<code>0</code> یا روشن/خاموش\n"
-                "• عددها: با ارقامِ فارسی هم می‌شود («۰.۶»)\n\n"
-                "روی هر مورد بزنید و مقدارِ تازه را بفرستید. برای دیدنِ توضیحِ کاملِ هر مورد، "
-                "همان مورد را بزنید.")
+                "کارِ ربات: کانال را می‌خواند و فایل‌های <b>تکراری</b> را با ۳ سیگنال پیدا می‌کند:\n"
+                "① <b>نامِ فایل</b> ② <b>کپشن</b> ③ <b>حجم + زمان</b> — و برای تأییدِ قطعی، <b>هشِ محتوا</b>.\n\n"
+                "👇 هر دکمه یک تنظیم است. اگر نمی‌دانید هرکدام چه کار می‌کند: روی خودش بزنید (توضیح + "
+                "گزینه‌ها می‌آید) یا «❓ هر گزینه یعنی چه؟» را بزنید.\n\n"
+                "<i>هر تغییر همان لحظه ذخیره می‌شود و تا تغییرِ بعدی می‌ماند.</i>")
         try:
             await self.api.send_message(chat, text, kb=R.kb(self._setting_rows()))
         except Exception as e:
-            # فال‌بک: اگر تلگرام کیبورد را نپذیرفت، متن می‌رود و کاربر با دستورِ /set هم می‌تواند تغییر دهد
+            # فال‌بک: اگر تلگرام کیبورد را نپذیرفت، متن می‌رود و راهِ /set گفته می‌شود
             log.warning("ارسالِ منوی تنظیمات با کیبورد ناموفق: %s", e)
             await self.api.send_message(
                 chat, text + "\n\n⚠️ دکمه‌ها ارسال نشد (<code>%s</code>)؛ با دستورِ "
                              "<code>/set کلید مقدار</code> تغییر دهید." % esc(e))
 
+    async def _setting_detail(self, chat: int, key: str, *, edit: Optional[int] = None,
+                              note: str = "") -> None:
+        """صفحهٔ توضیحِ یک تنظیم: «این چیست؟» + «گزینه‌ها با نتیجه‌شان» + دکمه‌های انتخاب."""
+        info = self._setting_info(key)
+        if not info:
+            await self.api.send_message(chat, "این گزینه پیدا نشد.")
+            return
+        cur = self._setting_display(key)
+        _d = self._setting_default(key)
+        default = ("روشن" if _d else "خاموش") if isinstance(_d, bool) else str(_d)
+        lines: List[str] = []
+        if note:
+            lines += [note, ""]
+        lines += ["%s <b>%s</b>" % (info.get("icon", "⚙️"), info.get("title", key)),
+                  "مقدارِ فعلی: <b>%s</b> · پیش‌فرض: <code>%s</code>" % (esc(cur), esc(default)), "",
+                  info.get("what", ""), ""]
+        choices = self._setting_choices(key)
+        if choices:
+            lines.append("<b>گزینه‌ها (روی دکمه بزنید = همان لحظه تغییر می‌کند):</b>")
+            for value, label, desc in choices:
+                mark = "✅" if str(value) == cur else "▫️"
+                lines.append("%s <b>%s</b>%s — <code>%s</code>" % (
+                    mark, esc(label), (" (فعلی)" if str(value) == cur else ""),
+                    esc(desc) if desc else esc(str(value))))
+            lines.append("")
+        if info.get("tip"):
+            lines += ["💡 %s" % info["tip"], ""]
+        lines.append("<i>مقدارِ دلخواه هم می‌شود: «✏️ تایپ می‌کنم». عددها با ارقامِ فارسی هم قبول است.</i>")
+        rows: List[List[Dict[str, str]]] = []
+        for value, label, _desc in choices:
+            if str(value) == cur:
+                rows.append([R.btn("✅ %s (فعلی)" % label, "nop:")])
+            else:
+                rows.append([R.btn("▫️ %s" % label, "stv:%s:%s" % (key, value))])
+        rows.append([R.btn("✏️ تایپ می‌کنم (مقدارِ دلخواه)", "sta:%s" % key)])
+        if cur != default:
+            rows.append([R.btn("♻️ پیش‌فرضِ همین گزینه (%s)" % default, "std:%s" % key)])
+        rows.append([R.btn("❓ راهنمای همه", "st:guide"), R.btn("⬅️ تنظیمات", "st:menu")])
+        txt = "\n".join(lines)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+    async def _settings_guide(self, chat: int, *, edit: Optional[int] = None) -> None:
+        """«هر گزینه یعنی چه؟» — راهنمای فارسیِ همهٔ تنظیم‌ها با مقدارِ فعلی و پیش‌فرض."""
+        parts: List[str] = []
+        buf = ("📖 <b>راهنمای تنظیمات — هر گزینه چه کار می‌کند</b>\n\n"
+               "<i>مقدارِ فعلی و پیش‌فرض هر مورد کنارش نوشته شده. برای تغییر، از «⚙️ تنظیمات» "
+               "روی همان گزینه بزنید.</i>\n\n")
+        for group, keys in SETTING_GROUPS:
+            buf += "<b>%s</b>\n" % group
+            for k in keys:
+                info = self._setting_info(k)
+                if not info:
+                    continue
+                _d = self._setting_default(k)
+                if isinstance(_d, bool):
+                    _d = "روشن" if _d else "خاموش"
+                buf += "• %s <b>%s</b> — %s\n  الان: <code>%s</code> · پیش‌فرض: <code>%s</code>\n" % (
+                    info.get("icon", ""), info.get("title", k), info.get("what", ""),
+                    self._setting_display(k), _d)
+            buf += "\n"
+            if len(buf) > 3000:                       # مرزِ ۴۰۹۶ نویسه‌ایِ تلگرام
+                parts.append(buf)
+                buf = ""
+        if buf:
+            parts.append(buf)
+        parts.append("<i>هر تغییر همان لحظه ذخیره می‌شود و تا تغییرِ بعدی می‌ماند.</i>")
+        kb = R.kb([[R.btn("⚙️ تنظیمات", "st:menu")], [R.btn("🏠 منوی اصلی", "home")]])
+        for i, part in enumerate(parts):
+            if i == 0 and edit:
+                await self.api.edit_message_text(chat, edit, part, kb=kb)
+            else:
+                await self.api.send_message(chat, part, kb=kb)
+
+    async def _reset_one_setting(self, chat: int, key: str, *, edit: Optional[int] = None) -> None:
+        default = self._setting_default(key)
+        try:
+            setattr(self.settings, key, default)
+            self.db.kv_set("setting:" + key, default)
+        except Exception as e:
+            await self.api.send_message(chat, "⚠️ نشد: <code>%s</code>" % esc(e))
+            return
+        show = "روشن" if default is True else ("خاموش" if default is False else str(default))
+        await self._setting_detail(chat, key, edit=edit,
+                                   note="♻️ به پیش‌فرض برگشت: <code>%s</code>" % esc(show))
+
+    # ── راهِ متنی (وقتی دکمه‌ها دردسر دارند): `/set <کلید> <مقدار>` ──
     @staticmethod
     def _match_setting_key(cand: str) -> Optional[str]:
-        """کلیدِ تنظیمات را از نامِ انگلیسی، برچسبِ کوتاه یا برچسبِ کاملِ فارسی پیدا می‌کند."""
+        """کلیدِ تنظیمات را از نامِ انگلیسی، برچسبِ کوتاه یا عنوانِ فارسی پیدا می‌کند."""
         c = str(cand or "").strip()
         if not c:
             return None
@@ -1130,23 +1387,39 @@ class BotApp:
         """مقدارِ نامعتبر: پیامِ روشن + **حفظِ حالتِ انتظار** تا مقدارِ درستِ بعدی گم نشود."""
         if keep:
             self.pending[chat] = {"kind": "setting", "key": key}
-        rows = [[R.btn("⚙️ تنظیمات", "st:menu")], [R.btn("🏠 منوی اصلی", "home")]]
-        await self.api.send_message(
-            chat,
-            "❌ مقدارِ نامعتبر برای <b>%s</b>.\nمقدارِ فعلی: <code>%s</code>\n%s%s" % (
-                LABELS.get(key, key), getattr(self.settings, key, "—"),
-                ("مقدارهای مجاز: " + VALUE_HELP[key] + "\n") if key in VALUE_HELP else "",
-                "دوباره بفرستید (یا /cancel)." if keep else ""),
-            kb=R.kb(rows))
+        info = self._setting_info(key)
+        choices = self._setting_choices(key)
+        lines = ["❌ مقدارِ نامعتبر برای «%s»." % esc(info.get("title", key)),
+                 "مقدارِ فعلی: <code>%s</code>" % esc(self._setting_display(key))]
+        if info.get("what"):
+            lines.append(info["what"])
+        if choices:
+            lines.append("مقدارهای مجاز: " + " · ".join("<code>%s</code> (%s)" % (esc(str(v)), esc(lab))
+                                                        for v, lab, _d in choices))
+        elif key in VALUE_HELP:
+            lines.append("مقدارهای مجاز: " + VALUE_HELP[key])
+        if keep:
+            lines.append("دوباره بفرستید (یا /cancel).")
+        info2 = self._setting_info(key)
+        kb = R.kb([[R.btn("⬅️ توضیحِ همین گزینه", "st:%s" % key)], [R.btn("⚙️ تنظیمات", "st:menu")]]) \
+            if info2 else R.kb([[R.btn("⚙️ تنظیمات", "st:menu")]])
+        await self.api.send_message(chat, "\n".join(lines), kb=kb)
 
     async def _ask_setting(self, chat: int, key: str) -> None:
         self.pending[chat] = {"kind": "setting", "key": key}
-        cur = getattr(self.settings, key)
+        info = self._setting_info(key)
         hint = VALUE_HELP.get(key, "یک عدد")
-        await self.api.send_message(chat, "⚙️ مقدارِ تازهٔ <b>%s</b> را بفرستید.\nمقدارِ فعلی: <code>%s</code>\n(%s)" % (
-            LABELS.get(key, key), cur, hint))
+        choices = self._setting_choices(key)
+        opts = ""
+        if choices:
+            opts = "\nمقدارهای مجاز: " + " · ".join("<code>%s</code>" % esc(str(v)) for v, _l, _d in choices)
+        await self.api.send_message(
+            chat, "✏️ مقدارِ تازهٔ <b>%s</b> را بفرستید.\nمقدارِ فعلی: <code>%s</code>\n(%s)%s" % (
+                info.get("title", key), esc(self._setting_display(key)), hint, opts),
+            kb=R.kb([[R.btn("⬅️ توضیحِ گزینه", "st:%s" % key)], [R.btn("⚙️ تنظیمات", "st:menu")]]))
 
-    async def _apply_setting(self, chat: int, key: str, value: str) -> None:
+    async def _apply_setting(self, chat: int, key: str, value: str, *, silent: bool = False) -> bool:
+        """اعتبارسنجی و ذخیره. `silent=True` ⇒ پیامِ تأیید نمی‌فرستد (صفحهٔ توضیح خودش نشان می‌دهد)."""
         v = self._norm_value(value)
         cur = getattr(self.settings, key, None)
         v2: Any = None
@@ -1154,7 +1427,7 @@ class BotApp:
             v2 = VALUE_ALIASES[key].get(v) or VALUE_ALIASES_SQUASHED[key].get(_squash(v))
             if v2 is None:
                 await self._invalid_setting(chat, key)
-                return
+                return False
         elif isinstance(cur, bool):
             if v in _TRUE_WORDS:
                 v2 = True
@@ -1162,38 +1435,54 @@ class BotApp:
                 v2 = False
             else:
                 await self._invalid_setting(chat, key)
-                return
+                return False
         elif isinstance(cur, int):
             try:
                 v2 = int(float(v))
             except Exception:
                 await self._invalid_setting(chat, key)
-                return
+                return False
             if v2 < 0 or (key == "min_duration_s" and v2 > 3600) or (key == "incr_tail" and v2 > 100000):
                 await self._invalid_setting(chat, key)
-                return
+                return False
         elif isinstance(cur, float):
             try:
                 v2 = float(v)
             except Exception:
                 await self._invalid_setting(chat, key)
-                return
+                return False
             if key.startswith("th_") and not (0.0 < v2 <= 1.0):
                 await self.api.send_message(
                     chat, "❌ آستانه‌ها باید بین ۰ و ۱ باشند (مثلِ <code>0.6</code>)، نه <code>%s</code>.\n"
-                          "دوباره بفرستید." % esc(str(value)))
+                          "دوباره بفرستید." % esc(str(value)),
+                    kb=R.kb([[R.btn("⬅️ توضیحِ همین گزینه", "st:%s" % key)]]))
                 self.pending[chat] = {"kind": "setting", "key": key}
-                return
+                return False
             if key == "size_tol_pct" and v2 < 0:
                 await self._invalid_setting(chat, key)
-                return
+                return False
         else:
             v2 = str(value).strip()
         self.pending.pop(chat, None)
         setattr(self.settings, key, v2)
         self.db.kv_set("setting:" + key, v2)
-        await self.api.send_message(chat, "✅ ذخیره شد: <b>%s</b> = <code>%s</code>" % (LABELS.get(key, key), v2),
-                                    kb=R.kb([[R.btn("⚙️ تنظیمات", "st:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+        if silent:
+            return True
+        info = self._setting_info(key)
+        await self.api.send_message(
+            chat, "✅ ذخیره شد: <b>%s</b> = <code>%s</code>" % (
+                info.get("title", LABELS.get(key, key)), self._setting_display(key)),
+            kb=R.kb([[R.btn("⬅️ همین گزینه (توضیح/تغییرِ بعدی)", "st:%s" % key),
+                      R.btn("⚙️ تنظیمات", "st:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+        return True
+
+    async def _set_setting_value(self, chat: int, key: str, value: str, *, edit: Optional[int] = None) -> None:
+        """کلیک روی دکمهٔ یک مقدارِ مشخص: ذخیره + تازه‌سازیِ همان صفحه (با ✅ روی مقدارِ تازه)."""
+        ok = await self._apply_setting(chat, key, value, silent=True)
+        info = self._setting_info(key)
+        note = "✅ ذخیره شد: <b>%s</b> = <code>%s</code>" % (
+            esc(info.get("title", key)), esc(self._setting_display(key))) if ok else ""
+        await self._setting_detail(chat, key, edit=edit, note=note)
 
     # ═════════════════════ ورودِ حسابِ کاربری ═════════════════════
     async def _account_menu(self, chat: int) -> None:
@@ -2198,18 +2487,29 @@ class BotApp:
             elif op == "adm":
                 await self._make_bot_admin(chat, int(parts[1]))
             elif op == "st":
-                key = parts[1] if len(parts) > 1 else ""
-                if key == "menu":
+                sub = parts[1] if len(parts) > 1 else "menu"
+                if sub == "menu":
                     await self._settings_menu(chat)
-                elif key == "reset":
+                elif sub == "guide":
+                    await self._settings_guide(chat, edit=mid)
+                elif sub == "reset":
                     self.db.kv_set("setting:reset", 1)
                     defaults = Settings()
                     for k in LABELS:
                         setattr(self.settings, k, getattr(defaults, k))
                         self.db.kv_set("setting:" + k, getattr(defaults, k))
-                    await self.api.send_message(chat, "♻️ تنظیمات به پیش‌فرض برگشت.", kb=R.kb([[R.btn("⚙️ تنظیمات", "st:menu")]]))
-                elif key in LABELS:
-                    await self._ask_setting(chat, key)
+                    await self.api.send_message(
+                        chat, "♻️ همهٔ تنظیمات به پیش‌فرض برگشت.\n"
+                              "<i>پیش‌فرض‌ها برای بیشترِ کانال‌ها مناسب‌اند.</i>",
+                        kb=R.kb([[R.btn("⚙️ تنظیمات", "st:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+                elif sub in LABELS:
+                    await self._setting_detail(chat, sub, edit=mid)     # اول توضیح، بعد انتخاب
+            elif op == "sta":
+                await self._ask_setting(chat, parts[1])                 # «✏️ تایپ می‌کنم»
+            elif op == "stv":
+                await self._set_setting_value(chat, parts[1], ":".join(parts[2:]), edit=mid)
+            elif op == "std":
+                await self._reset_one_setting(chat, parts[1], edit=mid)
             elif op == "scan":
                 sub = parts[1]
                 if sub == "cancel":
