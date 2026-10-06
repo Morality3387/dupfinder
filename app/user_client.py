@@ -14,21 +14,41 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger("dup.user")
 
-CHUNK = 131072  # ۱۲۸KB — مضربِ ۴۰۹۶ (شرطِ MTProto برای offset/limit)
+CHUNK = 131072        # ۱۲۸KB — تکهٔ «نمونه‌ای» (سر/میانه/ته)
+FULL_CHUNK = 524288   # ۵۱۲KB — تکهٔ حالتِ «هشِ کامل» (مضربِ ۴۰۹۶)
 
 
 def _is_video_kind(mime: str, kind: str) -> bool:
+    """آیا این mime با حالتِ انتخابیِ کاربر می‌خواند؟ (`video` | `video+doc` | `all`)
+
+    • `video`     ⇒ فقط ویدیو
+    • `video+doc` ⇒ ویدیو + هر سندِ غیرِ عکس/صدا
+    • `all`       ⇒ هر فایلِ همراه‌دار (سند، ویدیو، عکس…)
+    """
     mime = str(mime or "").lower()
     kind = str(kind or "video")
     if kind == "all":
         return True
-    if kind in ("video", "video+doc"):
-        if mime.startswith("video/"):
-            return True
-        if kind == "video+doc" and mime and not mime.startswith(("image/", "audio/")):
-            return True
-        return False
-    return mime.startswith("video/")
+    if mime.startswith("video/"):
+        return True
+    if kind == "video+doc":
+        return not mime.startswith(("image/", "audio/"))
+    return False
+
+
+def _kind_ok(row: Dict[str, Any], kind: str = "video") -> bool:
+    """همان تصمیم روی **ردیفِ فایل** (عکس‌ها mime ندارند و با `has_video`/`has_photo` شناخته می‌شوند)."""
+    kind = str(kind or "video")
+    if kind == "all":
+        return True
+    mime = str(row.get("mime") or "").lower()
+    if row.get("has_video") or mime.startswith("video/"):
+        return True
+    if kind == "video+doc":
+        if mime.startswith(("image/", "audio/")):
+            return False
+        return bool(mime or row.get("file_name"))
+    return False
 
 
 class UserClient:
@@ -36,6 +56,11 @@ class UserClient:
 
     def __init__(self, api_id: int = 0, api_hash: str = "", session_string: str = "", *,
                  session_factory=None):
+        # کشِ موجودیت/هشِ دسترسی — کانالِ خصوصی که فقط شناسه‌اش را داریم بدونِ این‌ها حل نمی‌شود
+        self._ent_cache: Dict[int, Any] = {}
+        self._peer_hash: Dict[int, int] = {}
+        self._hints: Dict[int, Dict[str, Any]] = {}
+        self.entity_misses: List[int] = []
         self.api_id = int(api_id or 0)
         self.api_hash = api_hash or ""
         self.session_string = session_string or ""
@@ -223,6 +248,122 @@ class UserClient:
             log.warning("qr_login_recreate ناموفق: %s", e)
             return ""
 
+    # ── حلِ موجودیت (کانالِ خصوصی) ──
+    def set_hint(self, tg_id: int, *, username: str = "", access_hash: Optional[int] = None,
+                 title: str = "") -> None:
+        """اطلاعاتِ کمکیِ کانال را نگه می‌دارد تا بعداً (حتی پس از ری‌استارت) حل شود."""
+        try:
+            key = abs(int(tg_id))
+        except Exception:
+            return
+        h = self._hints.setdefault(key, {})
+        if username:
+            h["username"] = str(username).lstrip("@")
+        if title:
+            h["title"] = str(title)
+        if access_hash:
+            self._peer_hash[key] = int(access_hash)
+            h["access_hash"] = int(access_hash)
+
+    @staticmethod
+    def _channel_id_of(tg_id: Any) -> int:
+        """`-1001234567890` ⇒ `1234567890` (شناسهٔ خامِ کانال برای InputPeerChannel)."""
+        raw = str(tg_id).strip()
+        n = abs(int(raw)) if raw.lstrip("-").isdigit() else 0
+        txt = str(n)
+        return int(txt[3:]) if txt.startswith("100") else n
+
+    @staticmethod
+    def _extract_hash(ent: Any) -> int:
+        for obj in (ent, getattr(ent, "peer", None)):
+            ah = getattr(obj, "access_hash", None)
+            if ah:
+                try:
+                    return int(ah)
+                except Exception:
+                    pass
+        return 0
+
+    def _remember_entity(self, key: int, ent: Any) -> None:
+        self._ent_cache[key] = ent
+        ah = self._extract_hash(ent)
+        if ah:
+            self._peer_hash[key] = ah
+            self._hints.setdefault(key, {})["access_hash"] = ah
+
+    async def _entity(self, tg_id: Any) -> Any:
+        """InputEntity با چند مسیرِ فال‌بک برای کانال‌های **خصوصی**.
+
+        ترتیب: کشِ حافظه → کشِ سشن (`get_input_entity`) → `InputPeerChannel` با
+        access_hashِ ذخیره‌شده → پیمایشِ گفتگوها (حساب عضوِ کانال است) → یوزرنیمِ کمکی.
+        اگر هیچ‌کدام نشد، خطای روشنِ فارسی می‌دهد تا کاربر بداند چه کند.
+        """
+        raw = str(tg_id).strip()
+        key = abs(int(raw)) if raw.lstrip("-").isdigit() else 0
+        if key and key in self._ent_cache:
+            return self._ent_cache[key]
+        if not key:                                      # یوزرنیم/لینک ⇒ مسیرِ عادی
+            return await self.client.get_input_entity(tg_id)
+
+        errors: List[str] = []
+        try:                                             # ۱) کشِ سشن
+            ent = await self.client.get_input_entity(int(tg_id))
+            self._remember_entity(key, ent)
+            return ent
+        except Exception as e:
+            errors.append(type(e).__name__)
+
+        ah = self._peer_hash.get(key) or int((self._hints.get(key) or {}).get("access_hash") or 0)
+        if ah:                                           # ۲) access_hashِ ذخیره‌شده
+            try:
+                from telethon.tl.types import InputPeerChannel, PeerChannel
+                cid_raw = self._channel_id_of(tg_id)
+                try:
+                    ent = await self.client.get_entity(PeerChannel(channel_id=cid_raw))
+                    if ent is not None:
+                        self._remember_entity(key, ent)
+                        return ent
+                except Exception as e:
+                    errors.append(type(e).__name__)
+                peer = InputPeerChannel(channel_id=cid_raw, access_hash=int(ah))
+                self._ent_cache[key] = peer
+                return peer
+            except Exception as e:
+                errors.append(type(e).__name__)
+
+        try:                                             # ۳) فهرستِ گفتگوها
+            # شناسه‌های ممکن: کاملِ منفی، بدونِ پیشوندِ ۱۰۰، و خودِ کلید
+            wanted = {key, self._channel_id_of(tg_id), -key}
+            async for d in self.client.iter_dialogs(limit=800):
+                e = getattr(d, "entity", None)
+                if e is not None and int(getattr(e, "id", 0) or 0) in wanted:
+                    self._remember_entity(key, e)
+                    log.info("کانال %s از فهرستِ گفتگوها حل شد", tg_id)
+                    return e
+        except Exception as e:
+            errors.append(type(e).__name__)
+
+        uname = str((self._hints.get(key) or {}).get("username") or "").lstrip("@")
+        if uname:                                        # ۴) یوزرنیمِ کمکی
+            try:
+                ent = await self.client.get_entity("@" + uname)
+                if ent is not None:
+                    self._remember_entity(key, ent)
+                    return ent
+            except Exception as e:
+                errors.append(type(e).__name__)
+
+        self.entity_misses.append(int(key))
+        log.warning("حلِ موجودیت ناموفق: tg_id=%s (تلاش‌ها: %s)", tg_id, ",".join(errors) or "-")
+        raise ValueError(
+            "کانال %s در سشن پیدا نشد. راهِ حل: ① کانال را با همین حساب یک‌بار باز کنید یا "
+            "دوباره با لینک/یوزرنیم به ربات بدهید، ② یا حسابِ کاربری را وصل کنید (🔑) تا "
+            "دسترسی‌ها تازه شود." % tg_id)
+
+    def peer_snapshot(self) -> Dict[str, Any]:
+        """{tg_id: access_hash} — برای ذخیره در دیتابیس و استفاده پس از ری‌استارت."""
+        return {str(k): int(v) for k, v in self._peer_hash.items() if v}
+
     # ── ادمین‌کردنِ ربات در کانال (با حسابِ کاربری) ──
     async def add_bot_admin(self, tg_id: int, bot_id: int, *, can_post: bool = True,
                             can_edit: bool = True) -> Dict[str, Any]:
@@ -235,7 +376,7 @@ class UserClient:
             from telethon.tl.functions.channels import EditAdminRequest
             from telethon.tl.types import ChannelAdminRights
             rights = ChannelAdminRights(post_messages=bool(can_post), edit_messages=bool(can_edit))
-            ent = await self.client.get_input_entity(int(tg_id))
+            ent = await self._entity(tg_id)
             await self.client(EditAdminRequest(channel=ent, user_id=int(bot_id), admin_rights=rights))
             log.info("ربات (id=%s) ادمینِ %s شد (بدونِ مجوزِ حذف)", bot_id, tg_id)
             return {"ok": True, "error": ""}
@@ -248,7 +389,7 @@ class UserClient:
         try:
             from telethon.tl.functions.channels import GetParticipantRequest
             from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
-            ent = await self.client.get_input_entity(int(tg_id))
+            ent = await self._entity(tg_id)
             res = await self.client(GetParticipantRequest(channel=ent, participant=int(bot_id)))
             p = getattr(res, "participant", None)
             return isinstance(p, (ChannelParticipantAdmin, ChannelParticipantCreator))
@@ -277,15 +418,18 @@ class UserClient:
 
     @staticmethod
     def msg_to_file(msg: Any) -> Optional[Dict[str, Any]]:
-        """تبدیلِ پیامِ Telethon به ردیفِ فایل (فقط ویدیو/سندِ ویدیویی)."""
+        """تبدیلِ پیامِ Telethon به ردیفِ فایل (هر سندِ همراه‌دار؛ فیلترِ نوع در `iter_videos`).
+
+        ⚠️ قبلاً هر سندِ غیرِویدیویی همین‌جا رد می‌شد و در نتیجه حالت‌های
+        `video+doc`/`all` هرگز به نتیجه نمی‌رسیدند (باگِ کشف‌شده در بازبینی).
+        """
         try:
             doc = getattr(msg, "document", None)
             video = getattr(msg, "video", None)
-            if doc is None and video is None:
+            photo = getattr(msg, "photo", None)
+            if doc is None and video is None and photo is None:
                 return None
             mime = str(getattr(doc, "mime_type", "") or "")
-            if video is None and not mime.startswith("video/"):
-                return None
             size = 0
             duration = 0
             width = height = 0
@@ -302,6 +446,14 @@ class UserClient:
                 pass
             if not size and doc is not None:
                 size = int(getattr(doc, "size", 0) or 0)
+            if not size and photo is not None:                     # عکس ⇒ حجمِ بزرگ‌ترین نسخه
+                try:
+                    size = max([int(getattr(t, "size", 0) or 0)
+                                for t in (getattr(photo, "sizes", None) or [])] or [0])
+                except Exception:
+                    size = 0
+            if size <= 0:
+                return None                                        # ردیفِ بی‌حجم به کاری نمی‌آید
             for attr in (getattr(doc, "attributes", None) or []):
                 cn = type(attr).__name__
                 if cn == "DocumentAttributeFilename" and not fname:
@@ -327,6 +479,7 @@ class UserClient:
                 "width": int(width or 0),
                 "height": int(height or 0),
                 "has_video": 1 if (video is not None or mime.startswith("video/")) else 0,
+                "has_photo": 1 if photo is not None else 0,
                 "protected": protected,
             }
         except Exception as e:  # pragma: no cover
@@ -337,7 +490,7 @@ class UserClient:
                           media_kinds: str = "video", wait_time: float = 0.3,
                           batch: int = 200) -> AsyncIterator[Dict[str, Any]]:
         """پیمایشِ **کاملِ** تاریخچه (قدیم → جدید) و بازگرداندنِ فایل‌های ویدیویی."""
-        ent = await self.client.get_input_entity(tg_id)
+        ent = await self._entity(tg_id)
         buf: List[Dict[str, Any]] = []
         kwargs: Dict[str, Any] = {"min_id": int(min_id or 0), "reverse": True, "wait_time": float(wait_time or 0)}
         if max_id:
@@ -348,7 +501,7 @@ class UserClient:
             row = self.msg_to_file(msg)
             if not row:
                 continue
-            if not _is_video_kind(row["mime"], media_kinds) and not row.get("has_video"):
+            if not _kind_ok(row, media_kinds):
                 continue
             buf.append(row)
             if len(buf) >= batch:
@@ -367,7 +520,7 @@ class UserClient:
         """
         out: Dict[str, Any] = {"total": 0, "last_id": 0, "title": ""}
         try:
-            ent = await self.client.get_input_entity(tg_id)
+            ent = await self._entity(tg_id)
             self.probed.append(int(tg_id))
             try:
                 from telethon.tl.functions.messages import GetHistoryRequest
@@ -393,30 +546,39 @@ class UserClient:
         return out
 
     async def hash_file(self, tg_id: int, msg_id: int, size: int = 0, *,
-                        mode: str = "head+mid+tail") -> Tuple[str, str]:
-        """هشِ محتوایی از چند تکهٔ فایل (بدونِ دانلودِ کامل). خروجی: (هش، دامنه)"""
+                        scope: str = "sample", mode: str = "") -> Tuple[str, str]:
+        """هشِ محتواییِ فایل. خروجی: (هش، دامنه)
+
+        `scope="sample"` ⇒ فقط سر/میانه/ته (سریع، نشانهٔ قوی ولی نه قطعی).
+        `scope="full"`   ⇒ **کلِ** فایل ⇒ «قطعاً همان فایل» (کند و پرمصرف).
+        """
+        if not scope or scope == "sample":
+            scope = "full" if str(mode or "").lower() == "full" else "sample"
         try:
-            ent = await self.client.get_input_entity(tg_id)
+            ent = await self._entity(tg_id)
             msg = await self.client.get_messages(ent, ids=int(msg_id))
             if msg is None or getattr(msg, "media", None) is None:
                 return "", ""
-            return await self._hash_msg(msg, size)
+            return await self._hash_msg(msg, size, scope=scope)
         except Exception as e:
             log.debug("hash_file(%s/%s) خطا: %s", tg_id, msg_id, e)
             return "", ""
 
     async def hash_batch(self, tg_id: int, items: Sequence[Tuple[int, int]],
-                         *, concurrency: int = 3) -> Dict[int, Tuple[str, str]]:
+                         *, concurrency: int = 3, scope: str = "sample",
+                         full_max_bytes: int = 0) -> Dict[int, Tuple[str, str]]:
         """هشِ گروهی: پیام‌ها را یک‌جا می‌گیرد و تکه‌های هر فایل را با محدودیتِ هم‌زمانی می‌خواند.
 
         ورودی: [(msg_id, size), …]   خروجی: {msg_id: (هش، دامنه)}
-        هیچ فایلی دانلودِ کامل یا پاک نمی‌شود — فقط سر/میانه/دُم (۱۲۸KB هر تکه).
+        هیچ فایلی دانلودِ کامل یا پاک نمی‌شود: در حالتِ نمونه‌ای فقط سر/میانه/دُم،
+        و در حالتِ `scope="full"` کلِ فایل (فقط برای فایل‌های کوچک‌تر از
+        `full_max_bytes`؛ بزرگ‌ترها خودکار به نمونه‌ای برمی‌گردند تا اسکن از پا نیفتد).
         """
         out: Dict[int, Tuple[str, str]] = {}
         todo = [(int(m), int(s or 0)) for m, s in (items or [])]
         if not todo:
             return out
-        ent = await self.client.get_input_entity(tg_id)
+        ent = await self._entity(tg_id)
         try:
             msgs = await self.client.get_messages(ent, ids=[m for m, _ in todo])
         except Exception as e:
@@ -428,6 +590,8 @@ class UserClient:
                 by_id[int(getattr(m, "id", 0) or 0)] = m
         sem = asyncio.Semaphore(max(1, int(concurrency)))
 
+        want_full = str(scope or "sample").lower() == "full"
+
         async def work(msg_id: int, size: int) -> Tuple[str, str]:
             async with sem:
                 msg = by_id.get(msg_id)
@@ -438,7 +602,8 @@ class UserClient:
                         msg = None
                 if msg is None or getattr(msg, "media", None) is None:
                     return "", ""
-                return await self._hash_msg(msg, size)
+                use = "full" if (want_full and (not full_max_bytes or size <= full_max_bytes)) else "sample"
+                return await self._hash_msg(msg, size, scope=use)
 
         results = await asyncio.gather(*[work(m, s) for m, s in todo], return_exceptions=True)
         for (msg_id, _size), r in zip(todo, results):
@@ -446,7 +611,7 @@ class UserClient:
         self.hash_batches.append(len(todo))
         return out
 
-    async def _hash_msg(self, msg: Any, size: int = 0) -> Tuple[str, str]:
+    async def _hash_msg(self, msg: Any, size: int = 0, *, scope: str = "sample") -> Tuple[str, str]:
         """هشِ چندتکه‌ایِ یک پیامِ ازپیش‌گرفته‌شده (هستهٔ مشترکِ hash_file/hash_batch)."""
         try:
             doc = getattr(msg, "document", None)
@@ -454,19 +619,22 @@ class UserClient:
                 or int(getattr(doc, "size", 0) or 0)
             if size <= 0:
                 return "", ""
+            is_full = str(scope or "sample").lower() == "full"
             h = hashlib.sha256()
             h.update(str(size).encode())
+            if is_full:
+                h.update(b"|full")            # دامنهٔ کامل، جدا از نمونه‌ای (تا قاطی نشوند)
             got: List[str] = []
-            for off, ln in chunk_plan(size, CHUNK):
+            for off, ln in (full_chunk_plan(size, FULL_CHUNK) if is_full else chunk_plan(size, CHUNK)):
                 buf = await self._download_chunk(msg, off, ln)
                 if not buf:
                     return "", ""
                 h.update(str(off).encode())
                 h.update(buf)
                 got.append("%d+%d" % (off, len(buf)))
-                if self.chunk_delay:
+                if self.chunk_delay and not is_full:
                     await asyncio.sleep(float(self.chunk_delay))
-            return h.hexdigest()[:32], ",".join(got)
+            return h.hexdigest()[:32], ("full" if is_full else ",".join(got))
         except Exception as e:
             log.debug("_hash_msg خطا: %s", e)
             return "", ""
@@ -484,13 +652,35 @@ class UserClient:
     async def forward(self, to_chat: int, tg_id: int, msg_ids: Sequence[int]) -> bool:
         """فوروارد با **حسابِ کاربری** (فال‌بکِ دوم وقتی ربات اجازه ندارد)."""
         try:
-            ent = await self.client.get_input_entity(tg_id)
+            ent = await self._entity(tg_id)
             await self.client.forward_messages(int(to_chat), list(msg_ids), ent)
             self.forwarded.append({"to": int(to_chat), "from": int(tg_id), "ids": [int(x) for x in msg_ids]})
             return True
         except Exception as e:
             log.info("فورواردِ کاربری ناموفق: %s", e)
             return False
+
+
+def full_chunk_plan(size: int, chunk: int = FULL_CHUNK) -> List[Tuple[int, int]]:
+    """تکه‌های دانلودِ **کلِ** فایل (هشِ کامل) — آفست‌ها مضربِ ۴۰۹۶.
+
+    هر تکه `chunk` بایت است و تکهٔ آخر به مضربِ ۴۰۹۶ گرد می‌شود (تلگرام بیشتر از
+    حجمِ فایل برنمی‌گرداند، پس این گرد‌کردن بی‌خطر است).
+    """
+    size = int(size or 0)
+    chunk = int(chunk or FULL_CHUNK)
+    if size <= 0:
+        return []
+    plan: List[Tuple[int, int]] = []
+    off = 0
+    while off < size:
+        ln = min(chunk, size - off)
+        ln = min(chunk, ((int(ln) + 4095) // 4096) * 4096)
+        if ln <= 0:
+            break
+        plan.append((off, ln))
+        off += ln
+    return plan
 
 
 def chunk_plan(size: int, chunk: int = CHUNK) -> List[Tuple[int, int]]:
