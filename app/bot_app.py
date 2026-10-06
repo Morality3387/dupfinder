@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -58,6 +59,7 @@ class BotApp:
         self._scan_lock = asyncio.Lock()
         self._offset = int(db.kv_get("tg_offset", 0) or 0)
         self._cmds_set = False
+        self.claim_code = ""          # کدِ یک‌بارمصرفِ مالکیت (فقط وقتی OWNER_ID خالی است)
         self.started_at = int(time.time())
         # قلابِ خواندنِ پیش‌نمایشِ عمومی (در تست‌ها با تابعِ ساختگی جایگزین می‌شود)
         self.preview_fetch = P.fetch_page
@@ -68,12 +70,57 @@ class BotApp:
         d.update({k: getattr(self.settings, k) for k in ("hash_mode", "media_kinds")})
         return d
 
+    def _ensure_claim_code(self) -> str:
+        """کدِ یک‌بارمصرفِ مالکیت — فقط در لاگِ سرور چاپ می‌شود (نه در چت).
+
+        باگِ امنیتیِ قبلی: اگر `OWNER_ID` تنظیم نشده بود، **اولین کسی که به ربات پیام
+        می‌داد مالک می‌شد**؛ در دیپلویِ عمومی یعنی هر غریبه‌ای ربات را می‌گرفت.
+        حالا تا وقتی کسی `/claim <کد>` نزند، هیچ‌کس مالک نیست و ربات فقط پیامِ
+        «مالک تنظیم نشده» می‌دهد. کد از `OWNER_CLAIM_CODE` (متغیرهای محیطی) هم
+        قابلِ تعیین است تا پس از ری‌استارت ثابت بماند.
+        """
+        if self.owner_id:
+            return ""
+        if not self.claim_code:
+            env_code = str(getattr(self.settings, "owner_claim_code", "") or "").strip()
+            self.claim_code = env_code or ("%06d" % random.randint(0, 999999))
+            log.warning("مالکِ ربات تنظیم نشده است (OWNER_ID خالی). کدِ مالکیت: %s — "
+                        "برای مالک‌شدن در چتِ ربات بفرستید: /claim %s", self.claim_code, self.claim_code)
+        return self.claim_code
+
     async def is_owner(self, uid: int) -> bool:
+        """آیا این کاربر مالک است؟ (بدونِ بوت‌استرپِ خودکار — باگِ امنیتیِ رفع‌شده)"""
         if not self.owner_id:
+            self._ensure_claim_code()
+            return False
+        return int(uid) == int(self.owner_id)
+
+    async def _try_claim_owner(self, chat: int, uid: int, text: str) -> bool:
+        """`/claim <کد>` ⇒ مالک‌شدن. قبل از دروازهٔ مالکیت صدا زده می‌شود."""
+        parts = text.split()
+        if not parts or parts[0].split("@")[0].lower() != "/claim":
+            return False
+        code = str(self._ensure_claim_code() or "")
+        given = parts[1].strip() if len(parts) > 1 else ""
+        if self.owner_id:                                  # قبلاً مالک دارد
+            await self.api.send_message(chat, "ℹ️ این ربات مالک دارد. اگر مالکیت را گم کرده‌اید، "
+                                              "کلیدِ <code>owner_id</code> را از دیتابیس پاک کنید.")
+            return True
+        if code and given and given == code:
             self.owner_id = int(uid)
             self.db.kv_set("owner_id", self.owner_id)
+            self.claim_code = ""
+            log.info("مالکِ ربات تعیین شد: %s", uid)
+            await self.api.send_message(chat, "✅ شما مالکِ ربات شدید. حالا /start را بزنید.\n"
+                                              "<i>برای امنیت، رمزِ مالکیت باطل شد.</i>")
             return True
-        return int(uid) == int(self.owner_id)
+        await self.api.send_message(
+            chat, "⛔️ کدِ مالکیت نادرست یا خالی است.\n"
+                  "کد در <b>لاگِ سرور</b> چاپ شده (Railway → سرویس → Logs) و شکلِ دستورش این است:\n"
+                  "<code>/claim 123456</code>\n\n"
+                  "<i>می‌خواهید کد ثابت باشد؟ متغیر <code>OWNER_CLAIM_CODE</code> را در Variables بگذارید. "
+                  "یا مستقیم <code>OWNER_ID</code> را به شناسهٔ عددی خودتان تنظیم کنید.</i>")
+        return True
 
     # ═════════════════════ حلقهٔ اصلی ═════════════════════
     async def run(self) -> None:
@@ -85,6 +132,8 @@ class BotApp:
             log.error("getMe ناموفق: %s", e)
         await self._set_commands()
         self._load_peer_hashes()      # access_hashهای کانال‌های خصوصی از دورهای قبل
+        if not self.owner_id:
+            self._ensure_claim_code()  # کدِ مالکیت فقط در لاگ (هرگز در چت)
         log.info("ربات آماده است (@%s)", self.bot_username)
         while True:
             try:
@@ -128,8 +177,13 @@ class BotApp:
         chat = int(m.get("chat", {}).get("id", 0))
         uid = int(m.get("from", {}).get("id", chat) or chat)
         text = str(m.get("text") or "").strip()
+        if not self.owner_id and await self._try_claim_owner(chat, uid, text):
+            return
         if not await self.is_owner(uid):
-            await self.api.send_message(chat, "⛔️ این ربات خصوصی است.")
+            await self.api.send_message(
+                chat, "⛔️ این ربات خصوصی است." if self.owner_id else
+                "⛔️ این ربات هنوز مالک ندارد. کدِ مالکیت در <b>لاگِ سرور</b> چاپ شده؛ "
+                "آن را این‌طور بفرستید: <code>/claim 123456</code>")
             return
         # 📱 شمارهٔ اشتراک‌گذاشته‌شده با دکمهٔ «ارسالِ شمارهٔ من»
         contact = m.get("contact") or {}
@@ -1101,12 +1155,22 @@ class BotApp:
             return
         scan_id = self.db.create_scan(cid, {"mode": "preview", "pages": pages,
                                             "media_kinds": cfg.get("media_kinds")})
-        self.db.add_files(_with_norms(lst))
-        files = _with_norms(self.db.files_of_channel(cid))
-        clusters = M.find_clusters(files, cfg)
+        self.db.upsert_files(_with_norms(lst))
+        # باگِ گزارش‌شده: قبلاً `find_clusters` روی **همهٔ** فایل‌های ذخیره‌شدهٔ کانال اجرا می‌شد،
+        # پس خروجی می‌توانست گروه‌هایی باشد که هیچ ربطی به صفحاتِ تازهٔ پیش‌نمایش ندارند (و
+        # روی کانالِ حجیم کند هم بود). حالا فقط جفت‌هایی بررسی می‌شوند که **یک سرشان در همین
+        # پنجرهٔ تازه** باشد؛ در نتیجه هر گروه حداقل یک پستِ تازه دارد.
+        window_msgs = set(int(x) for x in rows.keys())
+        all_files = _with_norms(self.db.files_of_channel(cid))
+        win_idx = {i for i, f in enumerate(all_files) if int(f.get("msg_id") or 0) in window_msgs}
+        pairs = [(a, b) for a, b in M.candidate_pairs(all_files, cfg) if a in win_idx or b in win_idx]
+        clusters = M.find_clusters(all_files, cfg, pairs=pairs)
+        clusters = [cl for cl in clusters
+                    if any(int(fid) in {int(all_files[i]["id"]) for i in win_idx} for fid in cl["ids"])]
         self.db.replace_groups(scan_id, cid, clusters)
-        note = ("این «اسکنِ محدود» است: فقط چند صفحهٔ آخرِ کانالِ عمومی و فقط بر پایهٔ "
-                "کپشن/نام — حجم و هش در دسترسِ تلگرام نیست. برای اسکنِ کامل، حسابِ کاربری را وصل کنید.")
+        note = ("این «اسکنِ محدود» است: فقط %s صفحهٔ آخرِ کانالِ عمومی (پست‌های تازه) و فقط بر پایهٔ "
+                "کپشن/نام — حجم و هش در دسترسِ تلگرام نیست. هر گروه دستِ‌کم یک پستِ تازه دارد. "
+                "برای اسکنِ کامل، حسابِ کاربری را وصل کنید." % pages)
         self.db.update_scan(scan_id, status="done", phase="done", finished_at=int(time.time()),
                             total_msgs=len(lst), seen_msgs=len(lst), files_found=len(lst),
                             hashed=0, groups_found=len(clusters),
