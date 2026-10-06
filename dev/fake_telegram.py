@@ -274,7 +274,9 @@ class FakeUser:
         self.probed.append(int(tg_id))
         rows = self.videos.get(int(tg_id), [])
         last = max([int(r.get("msg_id") or 0) for r in rows] or [0])
-        return {"total": self.total_hint or len(rows), "last_id": last}
+        t = (self.titles.get(int(tg_id)) or {})
+        return {"total": self.total_hint or len(rows), "last_id": last,
+                "title": str(t.get("title") or "")}      # مثلِ کلاینتِ واقعی عنوان هم می‌دهد
 
     async def iter_videos(self, tg_id: int, *, min_id: int = 0, max_id: int = 0, media_kinds: str = "video",
                           wait_time: float = 0.3, batch: int = 200, stats: Optional[Dict[str, Any]] = None):
