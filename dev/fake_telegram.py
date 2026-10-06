@@ -11,7 +11,7 @@ import hashlib
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.tg_api import TgError
-from app.user_client import chunk_plan
+from app.user_client import _kind_ok, chunk_plan
 
 
 class FakeApi:
@@ -131,14 +131,22 @@ class FakeApi:
         return None
 
 
-def content_hash_of(data: bytes, size: int = 0) -> str:
-    """همان الگوریتمِ UserClient.hash_file (برای تست‌های قطعیِ «هشِ یکسان»)."""
+def content_hash_of(data: bytes, size: int = 0, *, scope: str = "sample") -> str:
+    """همان الگوریتمِ UserClient.hash_file (برای تست‌های قطعیِ «هشِ یکسان»).
+
+    `scope="sample"` ⇒ سه تکهٔ سر/میانه/ته · `scope="full"` ⇒ کلِ محتوا.
+    """
     size = int(size or len(data))
     h = hashlib.sha256()
     h.update(str(size).encode())
-    for off, ln in chunk_plan(size):
-        h.update(str(off).encode())
-        h.update(data[off:off + ln])
+    if str(scope or "sample").lower() == "full":
+        h.update(b"|full")
+        data = data[:size]
+        h.update(data)
+    else:
+        for off, ln in chunk_plan(size):
+            h.update(str(off).encode())
+            h.update(data[off:off + ln])
     return h.hexdigest()[:32]
 
 
@@ -159,6 +167,9 @@ class FakeUser:
         self.api_hash = "x" * 32
         self.delay = float(delay)
         self.total_hint = int(total_hint)
+        self.hints: Dict[int, Dict[str, Any]] = {}
+        self.peer_hashes: Dict[int, int] = {}
+        self.entity_misses: List[int] = []
         self.hash_batches: List[int] = []
         self.forwarded: List[Dict[str, Any]] = []
         self.last_error = ""
@@ -267,25 +278,52 @@ class FakeUser:
     async def iter_videos(self, tg_id: int, *, min_id: int = 0, max_id: int = 0, media_kinds: str = "video",
                           wait_time: float = 0.3, batch: int = 200):
         rows = [dict(r) for r in self.videos.get(int(tg_id), []) if int(r.get("msg_id") or 0) > int(min_id or 0)]
+        # همان فیلترِ کلاینتِ واقعی (قبلاً حالتِ «video+doc»/«all» در شبیه‌ساز بی‌اثر بود)
+        rows = [r for r in rows if _kind_ok(r, media_kinds)]
         rows.sort(key=lambda r: int(r.get("msg_id") or 0))
         for r in rows:
             if self.delay:
                 await asyncio.sleep(self.delay)
             yield r
 
-    async def hash_file(self, tg_id: int, msg_id: int, size: int, *, mode: str = "head+mid+tail"):
-        out = await self.hash_batch(tg_id, [(msg_id, size)])
+    # ── همان API کلاینتِ واقعی برای هینت/هشِ دسترسی (کانالِ خصوصی) ──
+    def set_hint(self, tg_id: int, *, username: str = "", access_hash: Optional[int] = None,
+                 title: str = "") -> None:
+        try:
+            key = abs(int(tg_id))
+        except Exception:
+            return
+        h = self.hints.setdefault(key, {})
+        if username:
+            h["username"] = str(username).lstrip("@")
+        if title:
+            h["title"] = str(title)
+        if access_hash:
+            self.peer_hashes[key] = int(access_hash)
+            h["access_hash"] = int(access_hash)
+
+    def peer_snapshot(self):
+        return {str(k): int(v) for k, v in self.peer_hashes.items() if v}
+
+    async def hash_file(self, tg_id: int, msg_id: int, size: int, *, scope: str = "sample",
+                        mode: str = ""):
+        sc = scope if scope and scope != "sample" else ("full" if str(mode or "").lower() == "full" else "sample")
+        out = await self.hash_batch(tg_id, [(msg_id, size)], scope=sc)
         return out.get(int(msg_id), ("", ""))
 
-    async def hash_batch(self, tg_id: int, items: Sequence[Tuple[int, int]]) -> Dict[int, Tuple[str, str]]:
+    async def hash_batch(self, tg_id: int, items: Sequence[Tuple[int, int]], *, scope: str = "sample",
+                         full_max_bytes: int = 0) -> Dict[int, Tuple[str, str]]:
         self.hash_batches.append(len(items))
+        want_full = str(scope or "sample").lower() == "full"
         out: Dict[int, Tuple[str, str]] = {}
         for msg_id, size in items:
             data = self.contents.get((int(tg_id), int(msg_id)))
             if data is None:
                 out[int(msg_id)] = ("", "")
                 continue
-            out[int(msg_id)] = (content_hash_of(data, size or len(data)), "fake")
+            sc = "full" if (want_full and (not full_max_bytes or int(size or 0) <= full_max_bytes)) else "sample"
+            out[int(msg_id)] = (content_hash_of(data, size or len(data), scope=sc),
+                                "full" if sc == "full" else "fake")
             await asyncio.sleep(0)
         return out
 
@@ -306,6 +344,15 @@ def video(msg_id: int, name: str, *, size: int = 50 * MB, duration: int = 60, ca
             "file_unique_id": unique_id or ("U%d" % msg_id), "file_identify": str(doc_id or msg_id),
             "file_name": name, "caption": caption, "size": int(size), "duration": int(duration),
             "mime": mime, "width": 1920, "height": 1080, "has_video": 1, "protected": 0}
+
+
+def doc(msg_id: int, name: str, size: int, caption: str = "", mime: str = "application/pdf",
+        doc_id: int = 0) -> Dict[str, Any]:
+    """سندِ غیرِ‌ویدیویی (pdf/zip/…) — برای آزمایشِ حالتِ «video+doc» و «all»."""
+    return {"msg_id": int(msg_id), "grouped_id": 0, "date": 1760000000 + int(msg_id), "doc_id": int(doc_id or msg_id),
+            "file_unique_id": "u%d" % int(msg_id), "file_identify": str(doc_id or msg_id),
+            "file_name": name, "caption": caption, "size": int(size), "duration": 0, "mime": mime,
+            "width": 0, "height": 0, "kind": "doc"}
 
 
 def channel_dataset() -> Dict[str, Any]:
@@ -337,6 +384,8 @@ def channel_dataset() -> Dict[str, Any]:
         video(142, "Series.X.S01E03.1080p.mkv", size=99 * MB, duration=2395, caption="قسمت ۳", doc_id=9042),
         # ۶) فایلِ تکی (بدونِ هیچ تکرار)
         video(150, "Unique.Lecture.mp4", size=77 * MB, duration=1800, caption="درسِ یگانه", doc_id=9050),
+        # ۷) سندِ غیرِ‌ویدیویی — فقط در حالتِ «video+doc» / «all» دیده می‌شود
+        doc(160, "کتابِ آموزشِ پایتون.pdf", size=18 * MB, caption="کتاب آموزش پایتون", doc_id=9060),
     ]
     # محتوا: ۱۰۱ و ۱۰۲ بایت‌به‌بایت یکسان. «محتوا» فقط برای پایداریِ هش است؛
     # بایت‌های واقعیِ فایل لازم نیست (تکه‌های بیرون از داده ⇒ خالی حساب می‌شوند)،
