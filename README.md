@@ -54,7 +54,7 @@ MTProto)** — that is what makes "see every video in the channel" actually work
 
 ```bash
 pip install -r requirements.txt
-python3 -m pytest tests/ -q     # 178 tests
+python3 -m pytest tests/ -q     # 190 tests
 python3 dev/mock_e2e.py         # offline end-to-end demo: prints the real bot messages & buttons
 ```
 
@@ -73,7 +73,7 @@ app/report.py         message texts, progress bar, keyboards, Tehran dates
 app/bot_app.py        bot logic: menus, wizards, callbacks
 dev/fake_telegram.py  offline Telegram simulator
 dev/mock_e2e.py       offline demo of the full user journey
-tests/                178 tests (unit + end-to-end bot flow + real client path)
+tests/                190 tests (unit + end-to-end bot flow + real client path)
 ```
 
 ## Safety
