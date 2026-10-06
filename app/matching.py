@@ -279,7 +279,7 @@ def candidate_pairs(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
     by_token: Dict[str, List[int]] = defaultdict(list)
     for i, f in enumerate(files):
         cn = str(f.get("caption_norm") or "")
-        if len(cn) < S.MIN_CAPTION_LEN or cn in generic_captions:
+        if len(cn) < max(1, int(cfg.get("min_caption_len") or S.MIN_CAPTION_LEN)) or cn in generic_captions:
             continue
         for tk in set(S.tokens(cn)):
             if len(tk) < 3:
@@ -337,7 +337,8 @@ def verify_pair(fa: Dict[str, Any], fb: Dict[str, Any], cfg: Dict[str, Any], *,
     ca, cb = (fa.get("caption_norm") or fa.get("caption") or ""), (fb.get("caption_norm") or fb.get("caption") or "")
     if not (generic_captions and (ca in generic_captions or cb in generic_captions)):
         ok, sc = S.caption_similar(ca, cb, th_ratio=float(cfg.get("th_cap_ratio", 0.80)),
-                                   th_jaccard=float(cfg.get("th_cap_jaccard", 0.60)))
+                                   th_jaccard=float(cfg.get("th_cap_jaccard", 0.60)),
+                                   min_len=int(cfg.get("min_caption_len") or S.MIN_CAPTION_LEN))
         if ok:
             out["caption"] = sc
     ok, sc = S.size_time_same(fa, fb,
@@ -355,6 +356,31 @@ def verify_pair(fa: Dict[str, Any], fb: Dict[str, Any], cfg: Dict[str, Any], *,
     return out
 
 
+def _clique_groups(idxs: Sequence[int], edges: Set[Tuple[int, int]], *, min_size: int = 2) -> List[List[int]]:
+    """گروه‌بندیِ **سختگیرانه**: هر عضو باید با *همهٔ* اعضای گروهش جفتِ تأییدشده باشد.
+
+    چرا لازم است: خوشه‌بندیِ Union-Find گذراست — با `A~B` و `B~C` گروهِ `A+B+C` می‌سازد
+    حتی اگر `A~C` هیچ شباهتی نداشته باشد (ریسکِ false positive که کاربر گزارش کرد).
+    این‌جا حریصانه از پرپیوندترین عضو شروع می‌کنیم و فقط عضوِ سازگار با **همهٔ** اعضای
+    فعلی را اضافه می‌کنیم؛ اعضای جامانده در `stats["strict_leftovers"]` شمرده می‌شوند.
+    """
+    deg: Dict[int, int] = {int(i): 0 for i in idxs}
+    for a, b in edges:
+        if a in deg and b in deg:
+            deg[a] += 1
+            deg[b] += 1
+    order = sorted((int(i) for i in idxs), key=lambda i: (-deg.get(i, 0), i))
+    groups: List[List[int]] = []
+    for m in order:
+        for g in groups:
+            if all((min(m, x), max(m, x)) in edges for x in g):
+                g.append(m)
+                break
+        else:
+            groups.append([m])
+    return [sorted(g) for g in groups if len(g) >= min_size]
+
+
 def find_clusters(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
                   pairs: Optional[Sequence[Tuple[int, int]]] = None,
                   min_size: int = 2, stats: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
@@ -365,6 +391,10 @@ def find_clusters(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
     `exact` یعنی **محتوای کامل** یکی است (هشِ کامل یا همان آپلودِ تلگرام) — هشِ
     نمونه‌ای (سه‌تکه) دیگر «قطعی» شمرده نمی‌شود. `stats` هم آمارِ نامزدسازی را
     برمی‌گرداند (مثلِ تعدادِ جفت‌هایی که به‌خاطرِ سقف بررسی نشدند).
+
+    `cfg["cluster_mode"]="strict"` ⇒ هر عضو باید با **همهٔ** اعضای گروهش شبیه باشد
+    (بدونِ زنجیره‌شدنِ گذرا)؛ در حالتِ پیش‌فرض (`loose`) گروه‌های زنجیره‌ای با نشانهٔ
+    «🔗 زنجیره‌ای» در `reason` و فیلدِ `chain=True` مشخص می‌شوند.
     """
     files = list(files)
     if len(files) < 2:
@@ -388,10 +418,15 @@ def find_clusters(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
     if not pair_signals:
         return []
     comps = uf.groups()
+    edges = set(pair_signals.keys())                    # جفت‌های **تأییدشده** (همان یال‌های گراف)
+    strict = str(cfg.get("cluster_mode") or "loose").strip().lower() in ("strict", "سختگیرانه", "سخت")
     out: List[Dict[str, Any]] = []
-    for root, idxs in comps.items():
+    leftovers = 0
+
+    def build(idxs: Sequence[int]) -> Optional[Dict[str, Any]]:
+        """یک زیرگروه ⇒ دیکشنریِ خوشه (یا `None` اگر سیگنالی نداشت)."""
         if len(idxs) < min_size:
-            continue
+            return None
         members = set(idxs)
         agg: Dict[str, float] = {}
         for (i, j), sig in pair_signals.items():
@@ -399,7 +434,12 @@ def find_clusters(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
                 for k, v in sig.items():
                     agg[k] = max(agg.get(k, 0.0), v)
         if not agg:
-            continue
+            return None
+        links = sum(1 for (i, j) in edges if i in members and j in members)
+        n_mem = len(members)
+        density = round(links / float(max(1, n_mem * (n_mem - 1) // 2)), 3)
+        # گروهِ زنجیره‌ای = گرافی که **کامل** نیست (یالِ گمشده دارد) ⇒ همهٔ اعضا با هم شبیه نیستند
+        chain = bool(n_mem >= 3 and links < n_mem * (n_mem - 1) // 2)
         signals = [s for s in ORDER if s in agg]
         strength = max(SIGNAL_STRENGTH[s] for s in signals)
         # «قطعی» = محتوای کامل یکی است (هشِ کامل یا همان آپلودِ تلگرام).
@@ -430,10 +470,15 @@ def find_clusters(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
                     reason_items.append("حجم و زمانِ نزدیک")
             else:
                 reason_items.append(REASON_TEXT[sig])
+        if chain:
+            reason_items.append("🔗 زنجیره‌ای — همهٔ اعضا با هم شباهت ندارند")
         ids = sorted([int(files[i]["id"]) for i in idxs])
         weak_only = (signals == ["size_time"])
-        out.append({
+        return {
             "ids": ids,
+            "links": links,
+            "density": density,
+            "chain": chain,
             "signals": signals,
             "reason": " + ".join(reason_items),
             "size_time_exact": st_exact,
@@ -445,7 +490,21 @@ def find_clusters(files: Sequence[Dict[str, Any]], cfg: Dict[str, Any], *,
             "count": len(ids),
             "first_msg_id": min(int(files[i].get("msg_id") or 0) for i in idxs),
             "score": round(sum(agg.values()), 4),
-        })
+        }
+
+    for _root, idxs in comps.items():
+        if len(idxs) < min_size:
+            continue
+        groups = [list(idxs)]
+        if strict and len(idxs) > 2:
+            groups = _clique_groups(idxs, edges, min_size=min_size)
+            leftovers += max(0, len(idxs) - sum(len(g) for g in groups))
+        for g in groups:
+            cl = build(g)
+            if cl is not None:
+                out.append(cl)
+    if strict and leftovers and stats is not None:
+        stats["strict_leftovers"] = int(stats.get("strict_leftovers", 0)) + leftovers
     out.sort(key=lambda c: (-c["strength"], -c["count"], c["first_msg_id"], c["ids"][0]))
     return out
 
