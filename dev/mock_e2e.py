@@ -129,7 +129,13 @@ def main() -> int:
     tap("f:%d:%d:sizetime:0:%d" % (scan_id, cid, gid))
     print("\n" + "─" * 78 + "\n➐ لینکِ پیام‌ها (اگر فوروارد ممکن نباشد)")
     tap("u:%d:%d:%d" % (scan_id, cid, gid))
-    print("\n" + "─" * 78 + "\n➑ کنسل کردنِ اسکنِ در جریان (دکمهٔ «⏹ توقف و کنسل»)")
+    print("\n" + "─" * 78 + "\n➏.۵ 📤 فورواردِ همهٔ تکراری‌ها با یک دکمه (سقفِ هر نوبت = ۴ فایل)")
+    bot.forward_all_budget = 4
+    tap("fa:%d:%d:all:0" % (scan_id, cid))
+    tap("fa:%d:%d:all:0" % (scan_id, cid))
+    tap("fa:%d:%d:all:0" % (scan_id, cid))
+
+    print("\n" + "─" * 78 + "\n➐ کنسل کردنِ اسکنِ در جریان (دکمهٔ «⏹ توقف و کنسل»)")
     run(bot._start_scan(CHAT, cid, full=True))
 
     async def cancel_when_started():
