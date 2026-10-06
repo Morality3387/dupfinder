@@ -161,6 +161,7 @@ class FakeUser:
         self.forwarded: List[Dict[str, Any]] = []
         self.last_error = ""
         self.probed: List[int] = []
+        self.code_requests: List[str] = []      # شماره‌هایی که برایشان کد خواسته شده
 
     # ── وضعیت ──
     @property
@@ -179,23 +180,31 @@ class FakeUser:
 
     async def send_code(self, phone: str) -> str:
         self.last_code_phone = phone
-        return "hash-" + str(phone)
+        self.code_requests.append(str(phone))
+        return "hash-%d-%s" % (len(self.code_requests), phone)
 
     async def sign_in(self, phone: str, code: str, phone_code_hash: str = "") -> Dict[str, Any]:
-        if str(code).replace(" ", "") == "55555":
+        """۵۵۵۵۵ ✅ · ۱۱۱۱۱ رمزِ دو مرحله‌ای · ۹۹۹۹۹ کدِ منقضی · ۷۷۷۷۷ کدِ اشتباه."""
+        c = str(code).replace(" ", "").replace("-", "")
+        if c == "55555":
             self._ready = True
             self.session_string = "FAKE_SESSION"
-            return {"ok": True, "need_password": False, "error": ""}
-        if str(code).replace(" ", "") == "11111":
-            return {"ok": False, "need_password": True, "error": ""}
-        return {"ok": False, "need_password": False, "error": "PHONE_CODE_INVALID"}
+            return {"ok": True, "need_password": False, "error": "", "kind": "ok"}
+        if c == "11111":
+            return {"ok": False, "need_password": True, "error": "", "kind": "password"}
+        if c == "99999":
+            return {"ok": False, "need_password": False, "kind": "expired",
+                    "error": "The confirmation code has expired (caused by SignInRequest)"}
+        if c == "77777":
+            return {"ok": False, "need_password": False, "kind": "invalid", "error": "PHONE_CODE_INVALID"}
+        return {"ok": False, "need_password": False, "kind": "invalid", "error": "PHONE_CODE_INVALID"}
 
     async def sign_in_password(self, password: str) -> Dict[str, Any]:
         if password == "secret":
             self._ready = True
             self.session_string = "FAKE_SESSION"
-            return {"ok": True, "error": ""}
-        return {"ok": False, "error": "PASSWORD_HASH_INVALID"}
+            return {"ok": True, "error": "", "kind": "ok"}
+        return {"ok": False, "error": "PASSWORD_HASH_INVALID", "kind": "password"}
 
     async def resolve(self, ref: Any) -> Optional[Dict[str, Any]]:
         key = int(ref) if str(ref).lstrip("-").isdigit() else ref
