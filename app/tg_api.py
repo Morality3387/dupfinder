@@ -104,9 +104,12 @@ class TgApi:
 
     async def send_message(self, chat_id: int, text: str, *, kb: Optional[dict] = None,
                            parse_mode: str = "HTML", preview: bool = False,
-                           silent: bool = False, reply_to: Optional[int] = None) -> Dict[str, Any]:
+                           silent: bool = False, reply_to: Optional[int] = None,
+                           kb_extra: Optional[dict] = None) -> Dict[str, Any]:
+        """kb_extra برای ReplyKeyboard (مثلِ دکمهٔ شماره یا remove_keyboard) است."""
+        markup = kb if kb else kb_extra
         return await self.call("sendMessage", _throttle_chat=chat_id, chat_id=chat_id, text=text,
-                               parse_mode=parse_mode, reply_markup=json.dumps(kb) if kb else None,
+                               parse_mode=parse_mode, reply_markup=json.dumps(markup) if markup else None,
                                disable_web_page_preview=None if preview else True,
                                disable_notification=True if silent else None,
                                reply_to_message_id=reply_to)
