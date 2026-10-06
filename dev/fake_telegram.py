@@ -284,16 +284,16 @@ class FakeUser:
             stats["visited"] = 0
             stats["matched"] = 0
             stats["completed"] = False
-        rows = [dict(r) for r in self.videos.get(int(tg_id), []) if int(r.get("msg_id") or 0) > int(min_id or 0)]
+        all_rows = [dict(r) for r in self.videos.get(int(tg_id), []) if int(r.get("msg_id") or 0) > int(min_id or 0)]
         # همان فیلترِ کلاینتِ واقعی (قبلاً حالتِ «video+doc»/«all» در شبیه‌ساز بی‌اثر بود)
-        rows = [r for r in rows if _kind_ok(r, media_kinds)]
+        rows = [r for r in all_rows if _kind_ok(r, media_kinds)]
         rows.sort(key=lambda r: int(r.get("msg_id") or 0))
         if stats is not None:
             stats["entity_ok"] = True
+            # مثلِ کلاینتِ واقعی: `visited` همهٔ پیام‌های پیمایش‌شده است (نه فقط هم‌نوع‌ها)
+            stats["visited"] = len(all_rows)
+            stats["matched"] = len(rows)
         for r in rows:
-            if stats is not None:
-                stats["visited"] = int(stats["visited"]) + 1      # شبیه‌ساز فقط پیام‌های مدیادار دارد
-                stats["matched"] = int(stats["matched"]) + 1
             if self.delay:
                 await asyncio.sleep(self.delay)
             yield r
