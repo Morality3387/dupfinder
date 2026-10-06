@@ -1,0 +1,301 @@
+"""شبیه‌سازِ تلگرام برای تست‌های سرتاسری — بدونِ شبکه، بدونِ توکن.
+
+`FakeApi` جای `TgApi` و `FakeUser` جای `UserClient` می‌نشیند و همهٔ فراخوانی‌ها را
+ثبت می‌کنند تا بتوانیم ادعاهای واقعی بزنیم: «چه چیزی فرستاده شد؟» و «آیا چیزی
+از کانال پاک/ویرایش شد؟».
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from app.tg_api import TgError
+from app.user_client import chunk_plan
+
+
+class FakeApi:
+    """Bot API ساختگیِ درون‌حافظه‌ای."""
+
+    def __init__(self, *, me: Optional[Dict[str, Any]] = None, chats: Optional[Dict[int, Dict[str, Any]]] = None):
+        self.me = me or {"id": 999, "username": "dup_test_bot", "first_name": "Dup"}
+        self.chats = chats or {}
+        self.calls: List[Tuple[str, Dict[str, Any]]] = []
+        self.sent: List[Dict[str, Any]] = []          # پیام‌های ارسالی به چتِ مالک
+        self.edits: List[Dict[str, Any]] = []
+        self.forwards: List[Dict[str, Any]] = []
+        self.deletes: List[Dict[str, Any]] = []
+        self._mid = 1000
+        self._mid_seq = {}          # message_id ⇒ شمارهٔ ترتیبِ ساخت (برای «آخرین چیزی که کاربر دید»)
+        self.fail_forward_ids: set = set()
+        self.fail_copy_ids: set = set()
+        self.updates: List[Dict[str, Any]] = []
+        self.member_status: Dict[Tuple[int, int], str] = {}
+
+    # ── ابزار ──
+    def _log(self, method: str, **params: Any) -> None:
+        self.calls.append((method, params))
+
+    def messages_with(self, text: str) -> List[Dict[str, Any]]:
+        return [m for m in self.sent if text in str(m.get("text") or "")]
+
+    def methods(self) -> List[str]:
+        return [m for m, _ in self.calls]
+
+    # ── Bot API ──
+    async def get_me(self) -> Dict[str, Any]:
+        self._log("getMe")
+        return self.me
+
+    async def get_updates(self, offset: int = 0, timeout: int = 25) -> List[Dict[str, Any]]:
+        self._log("getUpdates", offset=offset)
+        out, self.updates = self.updates, []
+        await asyncio.sleep(0)
+        return out
+
+    async def send_message(self, chat_id: int, text: str, *, kb: Optional[dict] = None,
+                           parse_mode: str = "HTML", preview: bool = False, silent: bool = False,
+                           reply_to: Optional[int] = None) -> Dict[str, Any]:
+        self._mid += 1
+        rec = {"message_id": self._mid, "chat_id": int(chat_id), "text": text, "kb": kb, "parse_mode": parse_mode}
+        self._mid_seq[self._mid] = self._mid
+        self.sent.append(rec)
+        self._log("sendMessage", chat_id=chat_id, text=text, reply_markup=kb)
+        return rec
+
+    async def edit_message_text(self, chat_id: int, message_id: int, text: str, *,
+                                kb: Optional[dict] = None, parse_mode: str = "HTML") -> Any:
+        self.edits.append({"chat_id": int(chat_id), "message_id": int(message_id), "text": text, "kb": kb})
+        self._log("editMessageText", chat_id=chat_id, message_id=message_id, text=text, reply_markup=kb)
+        return {"message_id": message_id}
+
+    async def delete_message(self, chat_id: int, message_id: int) -> Any:
+        self.deletes.append({"chat_id": int(chat_id), "message_id": int(message_id)})
+        self._log("deleteMessage", chat_id=chat_id, message_id=message_id)
+        return True
+
+    async def answer_callback(self, cq_id: str, text: str = "", *, alert: bool = False) -> Any:
+        self._log("answerCallbackQuery", callback_query_id=cq_id, text=text)
+        return True
+
+    async def send_chat_action(self, chat_id: int, action: str = "typing") -> Any:
+        self._log("sendChatAction", chat_id=chat_id, action=action)
+        return True
+
+    async def forward_message(self, to_chat: int, from_chat: int, message_id: int) -> Dict[str, Any]:
+        self._log("forwardMessage", chat_id=to_chat, from_chat_id=from_chat, message_id=message_id)
+        if int(message_id) in self.fail_forward_ids:
+            raise TgError("forwardMessage", 400, "CHAT_FORWARDS_RESTRICTED")
+        self.forwards.append({"to": int(to_chat), "from": int(from_chat), "msg_id": int(message_id)})
+        self._mid += 1
+        return {"message_id": self._mid}
+
+    async def copy_message(self, to_chat: int, from_chat: int, message_id: int) -> Dict[str, Any]:
+        self._log("copyMessage", chat_id=to_chat, from_chat_id=from_chat, message_id=message_id)
+        if int(message_id) in self.fail_copy_ids:
+            raise TgError("copyMessage", 400, "CHAT_FORWARDS_RESTRICTED")
+        self._mid += 1
+        return {"message_id": self._mid}
+
+    async def get_chat(self, chat_id: Any) -> Dict[str, Any]:
+        self._log("getChat", chat_id=chat_id)
+        key = chat_id
+        if isinstance(chat_id, str) and chat_id.startswith("@"):
+            for cid, c in self.chats.items():
+                if ("@" + str(c.get("username"))) == chat_id:
+                    return c
+            raise TgError("getChat", 400, "chat not found")
+        if key in self.chats:
+            return self.chats[key]
+        raise TgError("getChat", 400, "chat not found")
+
+    async def get_chat_member(self, chat_id: Any, user_id: int) -> Dict[str, Any]:
+        self._log("getChatMember", chat_id=chat_id, user_id=user_id)
+        st = self.member_status.get((int(chat_id), int(user_id)), "administrator")
+        return {"status": st}
+
+    async def get_chat_member_count(self, chat_id: Any) -> int:
+        self._log("getChatMemberCount", chat_id=chat_id)
+        return 0
+
+    async def set_my_commands(self, commands: List[Dict[str, str]]) -> Any:
+        self._log("setMyCommands", commands=commands)
+        return True
+
+    async def get_file(self, file_id: str) -> Dict[str, Any]:
+        return {"file_id": file_id}
+
+    async def close(self) -> None:
+        return None
+
+
+def content_hash_of(data: bytes, size: int = 0) -> str:
+    """همان الگوریتمِ UserClient.hash_file (برای تست‌های قطعیِ «هشِ یکسان»)."""
+    size = int(size or len(data))
+    h = hashlib.sha256()
+    h.update(str(size).encode())
+    for off, ln in chunk_plan(size):
+        h.update(str(off).encode())
+        h.update(data[off:off + ln])
+    return h.hexdigest()[:32]
+
+
+class FakeUser:
+    """کلاینتِ کاربریِ ساختگی: تاریخچهٔ کانال + هشِ محتواییِ درون‌حافظه‌ای."""
+
+    def __init__(self, *, videos: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+                 contents: Optional[Dict[Tuple[int, int], bytes]] = None,
+                 titles: Optional[Dict[int, Dict[str, Any]]] = None, ready: bool = True,
+                 delay: float = 0.0, total_hint: int = 0):
+        self.videos = videos or {}
+        self.contents = contents or {}
+        self.titles = titles or {}
+        self._ready = ready
+        self.me = {"id": 777, "username": "dupe_user", "name": "Dup User"}
+        self.session_string = "FAKE_SESSION" if ready else ""
+        self.api_id = 12345
+        self.api_hash = "x" * 32
+        self.delay = float(delay)
+        self.total_hint = int(total_hint)
+        self.hash_batches: List[int] = []
+        self.forwarded: List[Dict[str, Any]] = []
+        self.last_error = ""
+        self.probed: List[int] = []
+
+    # ── وضعیت ──
+    @property
+    def configured(self) -> bool:
+        return True
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    async def start(self) -> bool:
+        return self._ready
+
+    async def stop(self) -> None:
+        self._ready = False
+
+    async def send_code(self, phone: str) -> str:
+        self.last_code_phone = phone
+        return "hash-" + str(phone)
+
+    async def sign_in(self, phone: str, code: str, phone_code_hash: str = "") -> Dict[str, Any]:
+        if str(code).replace(" ", "") == "55555":
+            self._ready = True
+            self.session_string = "FAKE_SESSION"
+            return {"ok": True, "need_password": False, "error": ""}
+        if str(code).replace(" ", "") == "11111":
+            return {"ok": False, "need_password": True, "error": ""}
+        return {"ok": False, "need_password": False, "error": "PHONE_CODE_INVALID"}
+
+    async def sign_in_password(self, password: str) -> Dict[str, Any]:
+        if password == "secret":
+            self._ready = True
+            self.session_string = "FAKE_SESSION"
+            return {"ok": True, "error": ""}
+        return {"ok": False, "error": "PASSWORD_HASH_INVALID"}
+
+    async def resolve(self, ref: Any) -> Optional[Dict[str, Any]]:
+        key = int(ref) if str(ref).lstrip("-").isdigit() else ref
+        info = self.titles.get(key)
+        if info:
+            return dict(info)
+        return None
+
+    async def probe(self, tg_id: int) -> Dict[str, Any]:
+        self.probed.append(int(tg_id))
+        rows = self.videos.get(int(tg_id), [])
+        last = max([int(r.get("msg_id") or 0) for r in rows] or [0])
+        return {"total": self.total_hint or len(rows), "last_id": last}
+
+    async def iter_videos(self, tg_id: int, *, min_id: int = 0, max_id: int = 0, media_kinds: str = "video",
+                          wait_time: float = 0.3, batch: int = 200):
+        rows = [dict(r) for r in self.videos.get(int(tg_id), []) if int(r.get("msg_id") or 0) > int(min_id or 0)]
+        rows.sort(key=lambda r: int(r.get("msg_id") or 0))
+        for r in rows:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            yield r
+
+    async def hash_file(self, tg_id: int, msg_id: int, size: int, *, mode: str = "head+mid+tail"):
+        out = await self.hash_batch(tg_id, [(msg_id, size)])
+        return out.get(int(msg_id), ("", ""))
+
+    async def hash_batch(self, tg_id: int, items: Sequence[Tuple[int, int]]) -> Dict[int, Tuple[str, str]]:
+        self.hash_batches.append(len(items))
+        out: Dict[int, Tuple[str, str]] = {}
+        for msg_id, size in items:
+            data = self.contents.get((int(tg_id), int(msg_id)))
+            if data is None:
+                out[int(msg_id)] = ("", "")
+                continue
+            out[int(msg_id)] = (content_hash_of(data, size or len(data)), "fake")
+            await asyncio.sleep(0)
+        return out
+
+    async def forward(self, to_chat: int, tg_id: int, msg_ids: Sequence[int]) -> bool:
+        self.forwarded.append({"to": int(to_chat), "from": int(tg_id), "ids": list(msg_ids)})
+        return True
+
+
+# ───────────────────────────── کارخانهٔ دادهٔ ساختگی ─────────────────────────────
+
+MB = 1024 * 1024
+
+
+def video(msg_id: int, name: str, *, size: int = 50 * MB, duration: int = 60, caption: str = "",
+          date: int = 1760000000, grouped_id: int = 0, mime: str = "video/mp4",
+          doc_id: int = 0, unique_id: str = "") -> Dict[str, Any]:
+    return {"msg_id": msg_id, "grouped_id": grouped_id, "date": date, "doc_id": doc_id or msg_id,
+            "file_unique_id": unique_id or ("U%d" % msg_id), "file_identify": str(doc_id or msg_id),
+            "file_name": name, "caption": caption, "size": int(size), "duration": int(duration),
+            "mime": mime, "width": 1920, "height": 1080, "has_video": 1, "protected": 0}
+
+
+def channel_dataset() -> Dict[str, Any]:
+    """سناریوی کاملِ تست: هر نوع تکراری که ربات باید پیدا کند."""
+    T = 3 * MB
+    v = [
+        # ۱) تکراریِ قطعی با هش (دو آپلودِ جدا، بایت‌های یکسان)
+        video(101, "Black.Mirror.S01E01.1080p.WEB-DL.x265.mkv", size=200 * MB, duration=3600,
+              caption="قسمت اول فصل یک", doc_id=9001),
+        video(102, "Black.Mirror.S01E01.1080p.WEB-DL.x265 (copy).mkv", size=200 * MB, duration=3600,
+              caption="قسمت اول فصل یک", doc_id=9002),
+        # ۲) نامِ مشابه (کیفیتِ متفاوت) — همان حجم/زمان هم
+        video(110, "Inception.2010.1080p.BluRay.x264.mkv", size=180 * MB, duration=8880,
+              caption="فیلم اینسپشن دوبله", doc_id=9010),
+        video(111, "Inception.2010.720p.BluRay.x264.mkv", size=180 * MB, duration=8880,
+              caption="فیلم اینسپشن دوبله", doc_id=9011),
+        # ۳) کپشنِ یکسان، نامِ متفاوت، حجم/زمان متفاوت
+        video(120, "clip-a401.mp4", size=12 * MB, duration=143,
+              caption="برنامهٔ ویژهٔ هفتهٔ اول پاییز با اجرای مهمان", doc_id=9020),
+        video(121, "clip-b902.mp4", size=9 * MB, duration=121,
+              caption="برنامهٔ ویژهٔ هفتهٔ اول پاییز با اجرای مهمان", doc_id=9021),
+        # ۴) حجم و زمانِ یکسان، نام و کپشنِ بی‌ربط ⇒ موردِ ★★★ کارفرما
+        video(130, "recording_1402_05_11.mp4", size=50 * MB, duration=60, caption="", doc_id=9030),
+        video(131, "zaban-3-final.mp4", size=50 * MB, duration=60, caption="", doc_id=9031),
+        video(132, "IMG_8842.mp4", size=50 * MB, duration=61, caption="", doc_id=9032),
+        # ۵) قسمت‌های پشت‌سرهم — **نباید** تکراری شمرده شوند
+        video(140, "Series.X.S01E01.1080p.mkv", size=100 * MB, duration=2400, caption="قسمت ۱", doc_id=9040),
+        video(141, "Series.X.S01E02.1080p.mkv", size=101 * MB, duration=2410, caption="قسمت ۲", doc_id=9041),
+        video(142, "Series.X.S01E03.1080p.mkv", size=99 * MB, duration=2395, caption="قسمت ۳", doc_id=9042),
+        # ۶) فایلِ تکی (بدونِ هیچ تکرار)
+        video(150, "Unique.Lecture.mp4", size=77 * MB, duration=1800, caption="درسِ یگانه", doc_id=9050),
+    ]
+    # محتوا: ۱۰۱ و ۱۰۲ بایت‌به‌بایت یکسان. «محتوا» فقط برای پایداریِ هش است؛
+    # بایت‌های واقعیِ فایل لازم نیست (تکه‌های بیرون از داده ⇒ خالی حساب می‌شوند)،
+    # وگرنه ساختِ گیگابایت داده در تست‌ها کند می‌شود.
+    contents: Dict[Tuple[int, int], bytes] = {}
+    same = bytes((i * 7) % 251 for i in range(20_000))
+    contents[(55, 101)] = same
+    contents[(55, 102)] = same
+    alphabet = b"abcdefghijklmnopqrstuvwxyz"
+    for row in v:
+        m = int(row["msg_id"])
+        if (55, m) in contents:
+            continue
+        contents[(55, m)] = bytes(alphabet[(m + i) % 26] for i in range(20_000))
+    return {"tg_id": 55, "title": {"tg_id": 55, "title": "کانالِ تست", "username": "testchan", "kind": "channel"},
+            "videos": v, "contents": contents}
