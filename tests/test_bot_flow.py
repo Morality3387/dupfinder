@@ -5,8 +5,10 @@
 بینِ فراخوانی‌ها زنده بماند، همه‌چیز روی **یک** حلقهٔ asyncio اجرا می‌شود.
 """
 import asyncio
+import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -90,6 +92,17 @@ class Env:
                     if contains in str(b.get("text", "")):
                         return b
         return None
+
+    def wait_bg(self, *, seconds: float = 3.0):
+        """کارهای پس‌زمینه (اسکن/QR) را تا پایان اجرا می‌کند."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            tasks = [t for t in asyncio.all_tasks(self.loop) if not t.done()]
+            if not tasks:
+                break
+            self.run(asyncio.wait(tasks, timeout=0.2))
+        # پیام‌های باقی‌مانده را نمایش بده
+        self.run(asyncio.sleep(0))
 
     def close(self):
         try:
@@ -456,10 +469,10 @@ def test_login_joined_code_is_refused_and_resend_works():
         e.tap("acc:login")
         e.text("+989120000000", mid=13)
         e.text("55555", mid=14)                  # ⛔️ چسبیده
-        assert "قبول نکردم" in e.last()
+        assert "قبول نکردم" in e.last() or "کدِ تازه فرستاده شد" in e.last()
         assert e.user.sign_in_calls == []        # هیچ تلاشی به تلگرام نرفت
-        assert e.kb_btn("کدِ تازه")
-        e.tap("acc:resend")                      # کدِ تازه (کدِ قبلی سوخته)
+        assert len(e.user.code_requests) == 2    # ربات خودش کدِ تازه گرفت (بدونِ دکمه زدن)
+        e.tap("acc:resend")                      # دکمهٔ کدِ تازه هم کار می‌کند
         assert "کدِ تازه فرستاده شد" in e.last()
         e.text("5 5 5 5 5", mid=15)              # ✅ رقم‌رقم
         assert e.user.sign_in_calls == ["55555"]
@@ -508,12 +521,254 @@ def test_login_send_code_failure_shows_fix_buttons():
         e.close()
 
 
+def test_login_phone_without_country_code_is_rejected_with_hint():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.text("09123456789", mid=13)
+        assert "کدِ کشور" in e.last() and "+9123456789" in e.last()
+        assert e.user.code_requests == []
+        e.text("۰۰۹۸۹۱۲۳۴۵۶۷۸۹", mid=14)              # فرمتِ ۰۰… با ارقامِ فارسی
+        assert e.user.code_requests == ["+989123456789"]
+        e.close()
+
+
 def test_login_cancel_clears_state():
     with tempfile.TemporaryDirectory() as d:
         e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
         e.tap("acc:login")
         e.tap("acc:cancel")
         assert "ورود لغو شد" in e.last() and e.bot.pending.get(CHAT) is None
+        e.close()
+
+
+def test_channels_show_names_not_numeric_ids():
+    """کارفرما: جای شناسهٔ عددی، نامِ کانال نشان داده شود."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()                             # کانال با یوزرنیم
+        assert "کانالِ تست" in e.last()
+        assert "(55)" not in e.last() and "<code>" not in e.last().split("ذخیره شد")[1]
+        e.run(e.bot._channel_view(CHAT, cid))
+        v = e.last()
+        assert "کانالِ تست" in v and re.search(r"🆔", v) is None
+        assert "55" not in v.replace("@testchan", "")     # شناسهٔ عددی چاپ نشده
+        # فهرستِ کانال‌ها هم نام را نشان می‌دهد
+        e.tap("ch:list")                                  # فهرستِ کانال‌ها هم نام را نشان می‌دهد
+        assert "کانالِ تست" in e.last() and "فایل" in e.last()
+        assert e.kb_btn("کانالِ تست") is not None
+        e.close()
+
+
+def test_make_bot_admin_grants_rights_without_delete():
+    """دکمهٔ «ادمین‌کردنِ ربات» با حسابِ کاربری انجام می‌شود و حقِ حذف نمی‌دهد."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.bot.bot_id = 8723059313
+        e.tap("adm:%d" % cid)
+        assert e.user.admin_calls == [{"tg_id": 55, "bot_id": 8723059313}]
+        assert e.user.admin_rights == {"post_messages": True, "edit_messages": True}
+        assert "delete" not in " ".join(e.user.admin_rights.keys())
+        assert "ادمینِ" in e.last()
+        e.tap("adm:%d" % cid)                              # بارِ دوم: تکراری انجام نمی‌شود
+        assert len(e.user.admin_calls) == 1 and "از قبل ادمین" in e.last()
+        e.close()
+
+
+def test_make_bot_admin_reports_failure_and_needs_session():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.bot.bot_id = 8723059313
+        e.user.admin_fails = True
+        e.tap("adm:%d" % cid)
+        assert "ناموفق" in e.last() and "Manage" in e.last()
+        # بدونِ حسابِ کاربری هم پیامِ راهنما می‌دهد
+        e2_path = Path(d) / "b"
+        e2_path.mkdir()
+        e2 = Env(e2_path, ready=False)
+        cid2 = e2.add_channel()
+        e2.tap("adm:%d" % cid2)
+        assert "حسابِ کاربری" in e2.last()
+        e2.close()
+        e.close()
+
+
+def test_qr_login_flow_and_refresh():
+    """ورود با QR: لینک فرستاده می‌شود، تأیید می‌شود، سشن ذخیره می‌شود."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.user._qr_confirmed = True                       # کاربر در تلگرام تأیید می‌کند
+        e.tap("acc:qr")
+        assert e.user.qr_starts == 1
+        assert "tg://login?token=FAKEQR1" in e.last() and "تأییدِ ورود" in e.last()
+        e.wait_bg()
+        assert e.db.kv_get("session_string") == "FAKE_SESSION"
+        assert "حساب وصل شد" in e.last_view()
+        e.close()
+
+
+def test_qr_login_expires_and_offers_code_path():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.user.qr_times_out = True
+        e.user.qr_refresh_limit = 2                      # بعد از دو نوبت تسلیم می‌شود
+        e.tap("acc:qr")
+        e.wait_bg()
+        assert "منقضی" in e.last_view() and e.kb_btn("QR تازه") is not None
+        assert e.user.qr_recreates >= 1
+        e.close()
+
+
+def test_qr_login_needs_api_keys():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False)                    # بدون api_id/api_hash
+        e.tap("acc:qr")
+        assert "api_id" in e.last() and e.user.qr_starts == 0
+        e.close()
+
+
+def test_login_accepts_persian_digits_with_separators():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.text("+989120000000", mid=13)
+        e.text("۲ ۸ ۷ ۳ ۴", mid=14)                       # ارقامِ فارسی + فاصله
+        assert e.user.sign_in_calls == ["28734"] and "کد اشتباه" in e.last()
+        e.text("۵ ۵ ۵ ۵ ۵", mid=15)                       # ارقامِ فارسیِ درست
+        assert e.user.sign_in_calls[-1] == "55555" and "وصل شد" in e.last()
+        e.close()
+
+
+def test_login_accepts_persian_digits_with_mixed_separators():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.text("+989120000000", mid=13)
+        e.text("1.1-1،1 1", mid=14)                       # کدِ ۱۱۱۱۱ ⇒ رمزِ دو مرحله‌ای
+        assert e.user.sign_in_calls == ["11111"]
+        assert "رمزِ دو مرحله‌ای" in e.last()
+        e.close()
+
+
+def test_forward_all_duplicates_with_headers_and_continue():
+    """📤 یک دکمه ⇒ همهٔ تکراری‌ها با سرتیترِ گروه به چت می‌آید (با ادامه در نوبت‌های بعد)."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))                                  # budget پیش‌فرض ۴۰ ⇒ یک‌باره
+        cid = e.add_channel()
+        e.tap("scan:full:%d" % cid)
+        e.wait_scan()
+        scan_id = e.db.last_scan(cid)["id"]
+        groups = e.db.groups_of_scan(scan_id)
+        total_files = sum(len(e.db.group_members(g["id"])) for g in groups)
+        assert total_files == 9                           # ۲+۳+۲+۲
+        e.tap("fa:%d:%d:all:0" % (scan_id, cid))
+        assert len(e.api.forwards) == total_files         # همه فوروارد شد
+        # به‌ازای هر گروه یک سرتیتر
+        heads = [m for m in e.api.sent if "گروهِ" in str(m.get("text", ""))]
+        assert len(heads) == len(groups)
+        v = e.last_view()
+        assert "فورواردِ همهٔ تکراری‌ها" in v and "همهٔ گروه‌های این فیلتر فرستاده شد" in v
+        assert e.kb_btn("ادامهٔ فوروارد") is None
+        # بارِ دوم: چیزی برای فرستادن نمی‌ماند (تکرار نمی‌کند)
+        before = len(e.api.forwards)
+        e.tap("fa:%d:%d:all:0" % (scan_id, cid))
+        assert len(e.api.forwards) == before and "قبلاً فرستاده شده" in e.last()
+        e.close()
+
+
+def test_forward_all_respects_budget_and_continue_button():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        e.bot.forward_all_budget = 5
+        cid = e.add_channel()
+        e.tap("scan:full:%d" % cid)
+        e.wait_scan()
+        scan_id = e.db.last_scan(cid)["id"]
+        e.tap("fa:%d:%d:all:0" % (scan_id, cid))
+        assert len(e.api.forwards) == 5                   # فقط سهمِ این نوبت
+        assert e.kb_btn("ادامهٔ فوروارد") is not None
+        assert "گروهِ دیگر مانده" in e.last_view()
+        e.tap("fa:%d:%d:all:0" % (scan_id, cid))                  # نوبتِ دوم
+        assert len(e.api.forwards) == 9
+        e.tap("fa:%d:%d:all:0" % (scan_id, cid))
+        assert "قبلاً فرستاده شده" in e.last()
+        e.close()
+
+
+def test_forward_all_skips_ignored_groups_and_uses_filter():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.tap("scan:full:%d" % cid)
+        e.wait_scan()
+        scan_id = e.db.last_scan(cid)["id"]
+        g0 = e.db.groups_of_scan(scan_id)[0]
+        e.db.set_group_state(g0["id"], "ignored")         # کاربر گفته «نادیده بگیر»
+        e.tap("fa:%d:%d:all:0" % (scan_id, cid))
+        sent_ids = {f["msg_id"] for f in e.api.forwards}
+        ignored_ids = {m["msg_id"] for m in e.db.group_members(g0["id"])}
+        assert not (sent_ids & ignored_ids)
+        # فیلترِ ★★★ حجم+زمان فقط همان گروه‌ها را می‌فرستد
+        e2_path = Path(d) / "z"
+        e2_path.mkdir()
+        e2 = Env(e2_path)
+        cid2 = e2.add_channel()
+        e2.tap("scan:full:%d" % cid2)
+        e2.wait_scan()
+        sid2 = e2.db.last_scan(cid2)["id"]
+        e2.tap("fa:%d:1:sizetime:0" % sid2)
+        want = {m["msg_id"] for g in e2.db.groups_of_scan(sid2, signal="sizetime")
+                for m in e2.db.group_members(g["id"])}
+        assert {f["msg_id"] for f in e2.api.forwards} == want
+        assert len(e2.api.forwards) == 7                  # ۲ + ۳ + ۲
+        e2.close()
+        e.close()
+
+
+def test_full_scan_finds_groups_with_three_and_four_members():
+    """بیش از دو فایل: گروه‌های ۳ و ۴ عضوی باید ساخته شوند."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.tap("scan:full:%d" % cid)
+        e.wait_scan()
+        scan_id = e.db.last_scan(cid)["id"]
+        sizes = sorted(len(e.db.group_members(g["id"])) for g in e.db.groups_of_scan(scan_id))
+        assert max(sizes) >= 3                            # گروهِ ۳ فایلی (۱۳۰/۱۳۱/۱۳۲)
+        # گروهِ ۵ فایلیِ هم‌حجم/هم‌زمان
+        e2_path = Path(d) / "m"
+        e2_path.mkdir()
+        e2 = Env(e2_path)
+        extra = [e2.ds["videos"][0].copy() for _ in range(3)]
+        for i, r in enumerate(extra):
+            r["msg_id"] = 900 + i
+            r["doc_id"] = 9000 + i
+            r["file_name"] = "extra-%d.mp4" % i
+            r["caption"] = ""
+            r["size"], r["duration"] = 50 * 1024 * 1024, 60
+            e2.user.videos[55].append(r)
+        cid2 = e2.add_channel()
+        e2.tap("scan:full:%d" % cid2)
+        e2.wait_scan()
+        sid = e2.db.last_scan(cid2)["id"]
+        best = max(len(e2.db.group_members(g["id"])) for g in e2.db.groups_of_scan(sid))
+        assert best >= 6                                   # ۳ فایلِ ۵۰MB/۶۰s + ۳ تای تازه
+        e2.close()
+        e.close()
+
+
+def test_scan_summary_and_list_have_forward_all_button():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.tap("scan:full:%d" % cid)
+        e.wait_scan()
+        scan_id = e.db.last_scan(cid)["id"]
+        assert e.kb_btn("فورواردِ همهٔ تکراری‌ها") is not None      # در گزارشِ اسکن
+        e.tap("l:%d:%d:all:0" % (scan_id, cid))
+        assert e.kb_btn("فورواردِ همهٔ تکراری‌ها") is not None      # در فهرستِ گروه‌ها
         e.close()
 
 
