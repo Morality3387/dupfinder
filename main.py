@@ -24,6 +24,7 @@ from app.user_client import UserClient  # noqa: E402
 
 log = logging.getLogger("dup")
 _STARTED_AT = time.time()          # برای uptime_s در /health (قبلاً اشتباهاً از ساعتِ monotonic خوانده می‌شد)
+REV = "2026-10-06-dk7"             # برچسبِ نسخه (در /health دیده می‌شود)
 
 
 def uptime_seconds() -> int:
@@ -67,6 +68,8 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
         body = {
             "ok": True,
             "app": "dupfinder",
+            "rev": REV,                       # برای تأییدِ سریعِ این‌که کدام نسخه روی سرور است
+
             "uptime_s": uptime_seconds(),
             "started_at": int(_STARTED_AT),
             "channels": st["channels"],
