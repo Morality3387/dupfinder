@@ -210,10 +210,36 @@ def remove_kb() -> Dict[str, Any]:
     return {"remove_keyboard": True}
 
 
+UNKNOWN_TITLE = "کانالِ بینام (بدون یوزرنیم)"
+
+
+def title_unknown(c: Dict[str, Any]) -> bool:
+    """آیا نامِ این کانال «نامعلوم/شناسه‌ای» است؟ (باید از تلگرام تازه گرفته شود)
+
+    دو حالت دارد: ① عنوان خالی است و یوزرنیمی هم نداریم؛ ② عنوان همان شناسهٔ عددی
+    است (میراثِ نسخه‌های قبل که `str(tg_id)` را به‌جای نام ذخیره می‌کردند) — همان چیزی
+    که در فهرستِ کانال‌ها به‌جای نام دیده می‌شد.
+    """
+    t = str(c.get("title") or "").strip()
+    tg = str(c.get("tg_id") or "").strip()
+    uname = str(c.get("username") or "").strip()
+    if t and t.lstrip("-").isdigit() and (t == tg or t == tg.lstrip("-") or t == "-" + tg):
+        return True                                   # «نام» = خودِ شناسه ⇒ نامعلوم
+    return not t and not uname
+
+
 def channel_title(c: Dict[str, Any]) -> str:
-    """نامِ نمایشیِ کانال: عنوان، بعد یوزرنیم، و در آخر شناسه (هیچ‌وقت شناسه اول نمی‌آید)."""
-    return str(c.get("title") or "").strip() or ("@" + str(c.get("username") or "").strip() if c.get("username") else "") \
-        or ("کانال " + str(c.get("tg_id") or ""))
+    """نامِ نمایشیِ کانال: عنوان، بعد یوزرنیم، و در آخر یک برچسبِ خوانا.
+
+    هرگز شناسهٔ عددی نشان داده نمی‌شود (خواستهٔ کاربر): اگر نام و یوزرنیم نبود،
+    برچسبِ «کانالِ بینام» می‌آید و در فهرست با دکمهٔ «🔄 نام‌ها» از تلگرام تازه می‌شود.
+    """
+    t = str(c.get("title") or "").strip()
+    tg = str(c.get("tg_id") or "").strip()
+    if t and t.lstrip("-").isdigit() and (t == tg or t == tg.lstrip("-") or t == "-" + tg):
+        t = ""                                        # عنوانِ شناسه‌ای = بی‌نام
+    uname = str(c.get("username") or "").strip().lstrip("@")
+    return t or ("@" + uname if uname else UNKNOWN_TITLE)
 
 
 def kb(rows: List[List[Dict[str, str]]]) -> Dict[str, Any]:
