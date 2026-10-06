@@ -449,6 +449,35 @@ def test_login_password_three_wrong_locks_out():
         e.close()
 
 
+def test_login_reset_clears_stored_api_keys():
+    """اگر api_id اشتباه ذخیره شده باشد، باید راهِ بیرون وجود داشته باشد."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.db.kv_set("api_id", 424242)
+        e.db.kv_set("api_hash", "h" * 32)
+        e.tap("acc:login")
+        e.tap("acc:reset")
+        assert "پاک شد" in e.last() and e.settings.api_id == 0 and e.settings.api_hash == ""
+        assert e.db.kv_get("api_id") in (0, "0") and e.db.kv_get("api_hash") == ""
+        e.tap("acc:login")                       # حالا از گامِ اول شروع می‌شود
+        assert "api_id" in e.last()
+        e.close()
+
+
+def test_login_send_code_failure_shows_fix_buttons():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+
+        async def boom(phone):
+            raise RuntimeError("ApiIdInvalidError: api_id is invalid")
+        e.user.send_code = boom
+        e.tap("acc:login")
+        e.text("+989120000000", mid=13)
+        assert "ارسالِ کد ناموفق" in e.last() and "api_id" in e.last()
+        assert e.kb_btn("کلیدها")
+        e.close()
+
+
 def test_login_cancel_clears_state():
     with tempfile.TemporaryDirectory() as d:
         e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
