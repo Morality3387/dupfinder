@@ -50,8 +50,10 @@ def test_full_scan_indexes_and_groups(tmp_path):
     reasons = " | ".join(g["reason"] for g in groups)
     assert "حجم و زمان" in reasons and "نام" in reasons and "کپشن" in reasons
     sid = res.scan_id
-    exact = [g for g in groups if g["exact"]]
-    assert exact and "هش" in exact[0]["reason"]
+    # هشِ پیش‌فرض «نمونه‌ای» است ⇒ قوی ولی نه قطعی (★★★★ فقط برای هشِ کامل/شناسهٔ تلگرام)
+    content = [g for g in groups if "نمونهٔ محتوا" in g["reason"]]
+    assert content and content[0]["strength"] == 3
+    assert [g for g in groups if g["exact"]] == []
     # شمارش‌های خلاصه
     assert db.count_groups(sid, signal="sizetime") >= 1
     assert db.get_scan(sid)["status"] == "done"
