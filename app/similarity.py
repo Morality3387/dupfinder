@@ -292,6 +292,9 @@ def size_time_same(fa: dict, fb: dict, *, size_tol_pct: float = 0.5, size_tol_mi
     (یا حجمِ بایت‌به‌بایت یکسان، یا زمانِ ثانیه‌به‌ثانیه). بدونِ این شرط، در کانال‌هایی
     که صدها کلیپِ هم‌اندازه با اختلافِ ۱ ثانیه دارند، همه در یک گروهِ غول‌آسا جمع
     می‌شدند (زنجیره‌شدنِ نامزدها) — باگِ واقعیِ کشف‌شده در تست.
+
+    ⚠️ امتیاز **فقط برای رتبه‌بندی** است؛ برای «آیا حجم/زمان دقیقاً برابرند» هیچ‌وقت
+    به امتیاز تکیه نکنید — `matching` از خودِ بایت‌ها/ثانیه‌ها استفاده می‌کند.
     """
     sa, sb = int(fa.get("size") or 0), int(fb.get("size") or 0)
     da, db = int(fa.get("duration") or 0), int(fb.get("duration") or 0)
@@ -305,10 +308,13 @@ def size_time_same(fa: dict, fb: dict, *, size_tol_pct: float = 0.5, size_tol_mi
         return False, 0.0
     if require_one_exact and (sa != sb) and (da != db):
         return False, 0.0
-    # امتیاز: ۱ ⇒ حجم/زمانِ یکسان، کمتر ⇒ تلورانسِ نزدیک لبه
-    sd = 1.0 - (abs(sa - sb) / max(1, max(sa, sb)))
-    dd = 1.0 - (abs(da - db) / max(1.0, float(dur_tol_s) * 4))
-    return True, round(0.6 * min(1.0, sd * 100) + 0.4 * min(1.0, dd), 4)
+    # امتیاز بر پایهٔ **تلورانس** نرمال می‌شود: ۱ ⇒ هر دو دقیقاً برابر، ۰ ⇒ روی لبهٔ تلورانس.
+    # (باگِ قبلی: `sd * 100` امتیازِ حجم را همیشه ۱ می‌کرد و باعث می‌شد پرچمِ
+    #  «حجم و زمان یکسان» حتی وقتی حجم‌ها فقط نزدیک بودند روشن شود.)
+    tol = max(int(size_tol_min), int(round(max(sa, sb) * max(0.0, size_tol_pct) / 100.0)))
+    size_score = 1.0 - min(1.0, abs(sa - sb) / float(max(1, tol)))
+    dur_score = 1.0 - min(1.0, abs(da - db) / float(max(1e-9, float(dur_tol_s))))
+    return True, round(0.6 * size_score + 0.4 * dur_score, 4)
 
 
 def hash_equal(fa: dict, fb: dict) -> bool:
