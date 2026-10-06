@@ -42,6 +42,11 @@ LABELS: Dict[str, str] = {
     "media_kinds": "نوعِ فایل‌های اسکن‌شده",
     "min_duration_s": "حداقل زمانِ ویدیو برای مقایسه (ثانیه)",
     "size_time_require_one_exact": "حالتِ حجم/زمان: یکی دقیقاً برابر باشد",
+    "hash_scope": "دامنهٔ هش: sample (سر+میانه+ته) یا full (کلِ فایل)",
+    "size_pair_cap": "سقفِ جفت‌های حجمِ نزدیک برای هر فایل",
+    "hash_full_max_mb": "سقفِ حجم برای هشِ کامل (مگابایت)",
+    "preview_pages": "تعدادِ صفحه در اسکنِ محدود (هر صفحه ~۲۰ پست)",
+    "preview_delay": "مکثِ بین صفحه‌های اسکنِ محدود (ثانیه)",
 }
 
 
@@ -70,6 +75,12 @@ class Settings:
     size_time_require_one_exact: bool = field(default_factory=lambda: _env_bool("SIZE_TIME_REQUIRE_ONE_EXACT", True))
     # ── رفتارِ اسکن/گزارش ──
     hash_mode: str = field(default_factory=lambda: _env("HASH_MODE", "candidates") or "candidates")  # off|candidates|all
+    hash_scope: str = field(default_factory=lambda: _env("HASH_SCOPE", "sample") or "sample")         # sample|full
+    hash_full_max_mb: int = field(default_factory=lambda: _env_int("HASH_FULL_MAX_MB", 200))
+    size_pair_cap: int = field(default_factory=lambda: _env_int("SIZE_PAIR_CAP", 240))
+    # ── اسکنِ محدود (بدونِ حسابِ کاربری، از پیش‌نمایشِ عمومیِ t.me/s) ──
+    preview_pages: int = field(default_factory=lambda: _env_int("PREVIEW_PAGES", 6))
+    preview_delay: float = field(default_factory=lambda: _env_float("PREVIEW_DELAY", 1.2))
     media_kinds: str = field(default_factory=lambda: _env("MEDIA_KINDS", "video") or "video")        # video|video+doc|all
     max_forward_per_group: int = field(default_factory=lambda: _env_int("MAX_FORWARD_PER_GROUP", 12))
     progress_interval: float = field(default_factory=lambda: _env_float("PROGRESS_INTERVAL", 2.0))
