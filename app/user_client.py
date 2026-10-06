@@ -279,7 +279,6 @@ class UserClient:
     def msg_to_file(msg: Any) -> Optional[Dict[str, Any]]:
         """تبدیلِ پیامِ Telethon به ردیفِ فایل (فقط ویدیو/سندِ ویدیویی)."""
         try:
-            media = getattr(msg, "media", None)
             doc = getattr(msg, "document", None)
             video = getattr(msg, "video", None)
             if doc is None and video is None:
