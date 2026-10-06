@@ -177,6 +177,85 @@ class UserClient:
                    "name": " ".join(x for x in [getattr(me, "first_name", ""), getattr(me, "last_name", "")] if x)}
         return {"ok": True, "error": ""}
 
+    # ── ورود با QR (بدونِ کدِ ورود ⇒ بدونِ ریسکِ «code previously shared») ──
+    async def qr_login_start(self) -> Optional[Dict[str, Any]]:
+        """شروعِ ورودِ QR. خروجی: {url, token} یا None."""
+        try:
+            await self.connect_only()
+            self._qr = await self.client.qr_login()
+            return {"url": str(getattr(self._qr, "url", "") or "")}
+        except Exception as e:
+            self.last_error = str(e)
+            log.warning("qr_login_start ناموفق: %s", e)
+            return None
+
+    async def qr_login_wait(self, timeout: float = 25.0) -> Dict[str, Any]:
+        """انتظار برای تأییدِ کاربر در تلگرام. خروجی: {ok|expired|error}"""
+        qr = getattr(self, "_qr", None)
+        if qr is None:
+            return {"ok": False, "error": "no_qr"}
+        try:
+            user = await qr.wait(timeout=float(timeout))
+            self.session_string = self.client.session.save()
+            self.me = {"id": getattr(user, "id", 0), "username": getattr(user, "username", "") or "",
+                       "name": " ".join(x for x in [getattr(user, "first_name", ""),
+                                                    getattr(user, "last_name", "")] if x)}
+            log.info("ورودِ QR تأیید شد (id=%s)", self.me.get("id"))
+            return {"ok": True, "me": self.me}
+        except asyncio.TimeoutError:
+            return {"ok": False, "expired": True, "error": "timeout"}
+        except Exception as e:
+            low = str(e).lower()
+            if "timeout" in low or "expired" in low:
+                return {"ok": False, "expired": True, "error": str(e)}
+            log.warning("qr_login_wait ناموفق: %s", e)
+            return {"ok": False, "error": str(e)}
+
+    async def qr_login_recreate(self) -> str:
+        """توکنِ تازه برای QR (کدِ قبلی باطل می‌شود). خروجی: url تازه."""
+        qr = getattr(self, "_qr", None)
+        if qr is None:
+            return ""
+        try:
+            await qr.recreate()
+            return str(getattr(qr, "url", "") or "")
+        except Exception as e:
+            log.warning("qr_login_recreate ناموفق: %s", e)
+            return ""
+
+    # ── ادمین‌کردنِ ربات در کانال (با حسابِ کاربری) ──
+    async def add_bot_admin(self, tg_id: int, bot_id: int, *, can_post: bool = True,
+                            can_edit: bool = True) -> Dict[str, Any]:
+        """ربات را ادمینِ کانال/گروه می‌کند.
+
+        ⚠️ عمداً **هیچ‌وقت** مجوزِ حذفِ پیام (`delete_messages`) داده نمی‌شود؛
+        ربات فقط می‌خواند/فوروارد می‌کند.
+        """
+        try:
+            from telethon.tl.functions.channels import EditAdminRequest
+            from telethon.tl.types import ChannelAdminRights
+            rights = ChannelAdminRights(post_messages=bool(can_post), edit_messages=bool(can_edit))
+            ent = await self.client.get_input_entity(int(tg_id))
+            await self.client(EditAdminRequest(channel=ent, user_id=int(bot_id), admin_rights=rights))
+            log.info("ربات (id=%s) ادمینِ %s شد (بدونِ مجوزِ حذف)", bot_id, tg_id)
+            return {"ok": True, "error": ""}
+        except Exception as e:
+            log.warning("add_bot_admin ناموفق: %s", e)
+            return {"ok": False, "error": str(e)}
+
+    async def is_bot_admin(self, tg_id: int, bot_id: int) -> bool:
+        """آیا ربات ادمینِ این کانال/گروه است؟"""
+        try:
+            from telethon.tl.functions.channels import GetParticipantRequest
+            from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
+            ent = await self.client.get_input_entity(int(tg_id))
+            res = await self.client(GetParticipantRequest(channel=ent, participant=int(bot_id)))
+            p = getattr(res, "participant", None)
+            return isinstance(p, (ChannelParticipantAdmin, ChannelParticipantCreator))
+        except Exception as e:
+            log.debug("is_bot_admin: %s", e)
+            return False
+
     # ── خواندنِ کانال ──
     async def resolve(self, ref: Any) -> Optional[Dict[str, Any]]:
         """شناسه/یوزرنیم/لینک ⇒ {tg_id,title,username,kind}"""
@@ -436,9 +515,22 @@ def chunk_plan(size: int, chunk: int = CHUNK) -> List[Tuple[int, int]]:
     return plan
 
 
+_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def norm_digits(s: Any) -> str:
+    """ارقامِ فارسی/عربی ⇒ لاتین («۲۸۷۳۴» ⇒ «28734»)."""
+    return str(s or "").translate(_DIGIT_MAP)
+
+
 def norm_phone(s: Any) -> str:
-    """شماره را به شکلِ «+ارقام» درمی‌آورد (هم برای تایپ، هم برای دکمهٔ تماس)."""
-    digits = re.sub(r"[^\d]", "", str(s or ""))
+    """شماره را به شکلِ «+ارقام» درمی‌آورد (هم برای تایپ، هم برای دکمهٔ تماس).
+
+    «۰۰۹۸۹۱۲…» (پیشوندِ بین‌المللیِ رایج) و ارقامِ فارسی هم پذیرفته می‌شوند.
+    """
+    digits = re.sub(r"[^\d]", "", norm_digits(s))
+    if digits.startswith("00"):
+        digits = digits[2:]
     return ("+" + digits) if digits else ""
 
 
