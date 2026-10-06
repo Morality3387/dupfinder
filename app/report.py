@@ -68,7 +68,7 @@ def file_line(f: Dict[str, Any], channel: Dict[str, Any], idx: Optional[int] = N
 # ───────────────────────────── متن‌ها ─────────────────────────────
 
 def scan_summary_text(scan: Dict[str, Any], channel: Dict[str, Any], counts: Dict[str, int],
-                      *, total_indexed: int = 0) -> str:
+                      *, total_indexed: int = 0, notes: Optional[List[str]] = None) -> str:
     st = {"done": "✅ کامل شد", "canceled": "⏹ کنسل شد", "error": "⚠️ خطا", "running": "⏳ در حال اجرا"}.get(
         str(scan.get("status")), str(scan.get("status")))
     lines = [
@@ -79,23 +79,27 @@ def scan_summary_text(scan: Dict[str, Any], channel: Dict[str, Any], counts: Dic
         lines.append("<i>🔄 ادامهٔ اسکن: فقط پیام‌های تازه‌تر از %s خوانده شد؛ گروه‌بندی روی کلِ ایندکس انجام می‌شود.</i>"
                      % _num(scan.get("min_id")))
     lines += [
-        "پیام‌های پیمایش‌شده: <b>%s</b>" % _num(scan.get("seen_msgs")),
-        "ویدیوهای دیده‌شده در این اسکن: <b>%s</b>" % _num(scan.get("files_found")),
-        "هشِ محتواییِ گرفته‌شده: <b>%s</b>" % _num(scan.get("hashed")),
+        "فایل‌های دیده‌شده در این اسکن: <b>%s</b>" % _num(scan.get("files_found")),
+        "پیام‌های پیمایش‌شده (تقریبی، از روی شناسه‌ها): <b>%s</b>" % _num(scan.get("seen_msgs")),
+        "هشِ گرفته‌شده: <b>%s</b>" % _num(scan.get("hashed")),
     ]
     if total_indexed:
         lines.append("کلِ ویدیوهای ایندکس‌شدهٔ این کانال: <b>%s</b>" % _num(total_indexed))
     lines += [
         "",
         "🔁 <b>گروه‌های تکراری: %s</b>" % _num(scan.get("groups_found")),
-        "   ★★★★ قطعی (هش/شناسه): %s" % counts.get("exact", 0),
+        "   ★★★★ قطعی — کلِ محتوا یکی است (هشِ کامل یا شناسهٔ خودِ تلگرام): %s" % counts.get("exact", 0),
+        "   🧬 نمونهٔ محتوا یکسان (سر+میانه+ته — قوی ولی نه قطعی): %s" % counts.get("content", 0),
         "   ★★★ حجم و زمان یکسان: %s" % counts.get("sizetime", 0),
         "   ★★ نامِ مشابه: %s" % counts.get("name", 0),
         "   ★ کپشنِ مشابه: %s" % counts.get("caption", 0),
     ]
     if scan.get("error"):
         lines += ["", "⚠️ خطا: <code>%s</code>" % esc(str(scan.get("error"))[:200])]
-    lines += ["", "<i>اولویتِ بررسی: ۱) نام ۲) کپشن ۳) حجم+زمان — و هشِ محتوایی به‌عنوانِ تأییدِ قطعی.</i>",
+    for nt in (notes or []):
+        lines += ["", "⚠️ %s" % esc(str(nt))]
+    lines += ["", "<i>اولویتِ بررسی: ۱) نام ۲) کپشن ۳) حجم+زمان — هشِ <b>کامل</b> تأییدِ قطعی است "
+                   "و هشِ نمونه‌ای (سه‌تکه) فقط نشانهٔ قوی است.</i>",
               "<i>ℹ️ یک گروه می‌تواند چند دلیل داشته باشد، پس جمعِ ردیف‌های بالا از تعدادِ گروه‌ها بیشتر است.</i>"]
     return "\n".join(lines)
 
@@ -152,9 +156,10 @@ def links_text(channel: Dict[str, Any], members: Sequence[Dict[str, Any]]) -> st
     return "\n".join(lines)
 
 
-FILTER_FA = {"all": "همه", "exact": "★★★★ قطعی", "sizetime": "★★★ حجم+زمان",
-             "name": "★★ نام", "caption": "★ کپشن", "open": "فقط رسیدگی‌نشده"}
-FILTERS = ["all", "exact", "sizetime", "name", "caption", "open"]
+FILTER_FA = {"all": "همه", "exact": "★★★★ قطعی", "content": "🧬 نمونهٔ محتوا",
+             "sizetime": "★★★ حجم+زمان", "name": "★★ نام", "caption": "★ کپشن",
+             "open": "فقط رسیدگی‌نشده"}
+FILTERS = ["all", "exact", "content", "sizetime", "name", "caption", "open"]
 
 
 # راهنمای ثابتِ فرمتِ کدِ ورود: تلگرام کدِ یک‌پارچه را «قبلاً به‌اشتراک‌گذاشته» می‌شمارد
@@ -259,14 +264,18 @@ def group_kb(channel_id: int, scan_id: int, filt: str, page: int, gid: int) -> D
 
 
 def progress_text(phase: str, ch_title: str, pct: float, *, seen: int = 0, total: int = 0,
-                  files: int = 0, hashed: int = 0, hash_total: int = 0, note: str = "") -> str:
+                  files: int = 0, hashed: int = 0, hash_total: int = 0, note: str = "",
+                  cur_id: int = 0, top_id: int = 0) -> str:
     head = {"index": "📥 مرورِ تاریخچه", "hash": "🧬 هش‌گذاری", "match": "🧠 تحلیل و گروه‌بندی",
             "done": "✅ پایان", "canceled": "⏹ کنسل شد", "error": "⚠️ خطا"}.get(phase, phase)
     lines = ["<b>%s</b> — %s" % (head, esc(ch_title or "")),
              "<code>%s</code>" % bar(pct)]
     if phase in ("index", "hash"):
-        tot = (" از %s" % _num(total)) if total else ""
-        lines.append("پیام‌های بررسی‌شده: <b>%s</b>%s" % (_num(seen), tot))
+        if top_id and cur_id:
+            lines.append("پیشرفت بر اساسِ شمارهٔ پیام: <b>#%s</b> از <b>#%s</b>"
+                         % (_num(cur_id), _num(top_id)))
+        tot = (" از %s پیامِ کانال" % _num(total)) if total else ""
+        lines.append("ویدیوهای پیداشده تا حالا: <b>%s</b>%s" % (_num(seen), tot))
     lines.append("ویدیوهای پیداشده: <b>%s</b>" % _num(files))
     if hash_total:
         lines.append("هش‌گذاری: <b>%s</b> از %s" % (_num(hashed), _num(hash_total)))
