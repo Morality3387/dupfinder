@@ -217,3 +217,32 @@ def test_forward_all_never_sends_a_file_twice(tmp_path):
         assert len(sent) == 9, sent                       # کلِ ۹ فایلِ تکراری
         assert len(set(sent)) == len(sent), "فایلی دو بار فرستاده شد"
         e.close()
+
+
+def test_candidate_pairs_works_without_pre_normalized_fields():
+    """اگر ردیف‌ها فقط `file_name` داشته باشند هم سیگنالِ نام باید کار کند، نه اینکه بی‌صدا خاموش شود."""
+    rows = [{"id": i, "message_id": i, "channel_id": 1, "file_name": nm, "caption": "",
+             "size": 700 * MB + i * 8192, "duration": 3600 + i, "content_hash": ""}
+            for i, nm in enumerate(["Atomic.Blonde.2017.1080p.WEB-DL.mkv",
+                                    "Atomic.Blonde.2017.720p.HDTV.mkv",
+                                    "Atomic.Blonde.2017.480p.DVDRip.mkv"])]
+    assert M.candidate_pairs(rows, CFG), "سیگنالِ نام با ردیف‌های خام باید نامزد بسازد"
+
+
+def test_same_name_different_quality_is_matched():
+    """سه نسخهٔ یک فیلم با کیفیت‌های مختلف (حجم/مدتِ متفاوت) باید تکراری شناخته شوند."""
+    rows = [{"id": i + 1, "message_id": i + 1, "channel_id": 1, "file_name": nm, "caption": "",
+             "size": sz, "duration": dur, "content_hash": ""}
+            for i, (nm, sz, dur) in enumerate([
+                ("فیلم تست 1080p.mkv", 1200 * MB, 5400),
+                ("فیلم تست 720p.mkv", 640 * MB, 5400),
+                ("فیلم تست 480p.mkv", 260 * MB, 5410)])]
+    rows = [{**r, "name_norm": __import__("app.similarity", fromlist=["x"]).name_norm(r["file_name"]),
+             "caption_norm": ""} for r in rows]
+    cands = M.candidate_pairs(rows, CFG)
+    assert cands, "کاندیدای نام ساخته نشد"
+    sigs = [M.verify_pair(rows[a], rows[b], CFG) for a, b in cands]
+    assert all(sigs), [c for c, s in zip(cands, sigs) if not s]      # هر جفت تأیید شود
+    assert all("name" in s for s in sigs)                            # از راهِ سیگنالِ نام
+    clusters = M.find_clusters(rows, CFG)
+    assert len(clusters) == 1 and sorted(clusters[0]["ids"]) == [1, 2, 3]
