@@ -349,16 +349,112 @@ def test_login_wizard_code_and_2fa_and_session_management():
         e.close()
 
 
-def test_login_wrong_code():
+def test_login_wrong_code_offers_fresh_code():
     with tempfile.TemporaryDirectory() as d:
         e = Env(Path(d), ready=False)
         e.tap("acc:login")
         e.text("12345", mid=11)
         e.text("z" * 32, mid=12)
         e.text("+989120000000", mid=13)
-        e.text("00000", mid=14)                 # کدِ غلط
-        assert "ورود ناموفق" in e.last()
-        assert e.bot.pending.get(CHAT) is None
+        e.text("77777", mid=14)                 # کدِ اشتباه
+        assert "کد اشتباه" in e.last()
+        assert e.bot.pending.get(CHAT) is not None          # وضعیت حفظ می‌شود
+        assert e.kb_btn("کدِ تازه")                          # دکمهٔ «کدِ تازه» هست
+        n = len(e.user.code_requests)
+        e.tap("acc:resend")                                 # درخواستِ کدِ تازه
+        assert len(e.user.code_requests) == n + 1 and "کدِ تازه" in e.last()
+        e.text("55555", mid=15)                             # کدِ درست
+        assert "وصل شد" in e.last() and e.db.kv_get("session_string") == "FAKE_SESSION"
+        e.close()
+
+
+def test_login_expired_code_then_resend_succeeds():
+    """همان چیزی که کاربر دید: کدِ منقضی ⇒ پیامِ روشن + دکمهٔ کدِ تازه (نه شروع از صفر)."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False)
+        e.tap("acc:login")
+        e.text("12345", mid=11)
+        e.text("z" * 32, mid=12)
+        e.text("+989120000000", mid=13)
+        e.text("99999", mid=14)                 # کدِ پیامِ قبلی ⇒ منقضی
+        assert "باطل/منقضی" in e.last() and "کدِ تازه" in e.last()
+        assert e.bot.pending.get(CHAT)["kind"] == "login_code"
+        e.tap("acc:resend")
+        assert "کدِ تازه فرستاده شد" in e.last()
+        e.text("55555", mid=15)
+        assert "وصل شد" in e.last()
+        e.close()
+
+
+def test_login_skips_api_steps_when_variables_set():
+    """api_id/api_hash از Variables آمده‌اند ⇒ فقط شماره و کد پرسیده می‌شود."""
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:menu")
+        assert "تنظیم شده" in e.last()
+        e.tap("acc:login")
+        assert "api_id" not in e.last() and "شمارهٔ همان حساب" in e.last()
+        assert "گام ۱ از ۲" in e.last()
+        kb = e.api.sent[-1]["kb"]                                # دکمهٔ اشتراکِ شماره
+        assert kb["keyboard"][0][0].get("request_contact") is True
+        e.close()
+
+
+def test_login_phone_by_contact_button():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.run(e.bot.handle_message({"chat": {"id": CHAT}, "from": {"id": OWNER}, "message_id": 21,
+                                    "contact": {"phone_number": "989123456789", "user_id": OWNER}}))
+        assert e.user.code_requests == ["+989123456789"]          # نرمال‌سازیِ شماره
+        assert "کدِ پیامک/تلگرام" in e.last()
+        e.text("55555", mid=22)
+        assert "وصل شد" in e.last() and e.db.kv_get("session_string") == "FAKE_SESSION"
+        e.close()
+
+
+def test_login_contact_cannot_be_someone_elses():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.run(e.bot.handle_message({"chat": {"id": CHAT}, "from": {"id": OWNER}, "message_id": 21,
+                                    "contact": {"phone_number": "989120000000", "user_id": 987654}}))
+        assert "خودتان" in e.last() and e.user.code_requests == []
+        e.close()
+
+
+def test_login_password_retry():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.text("+989120000000", mid=13)
+        e.text("11111", mid=14)                    # نیاز به رمزِ دو مرحله‌ای
+        assert "رمزِ دو مرحله‌ای" in e.last()
+        e.text("nope", mid=15)
+        assert "تلاشِ ۱ از ۳" in e.last()
+        e.text("secret", mid=16)                   # رمزِ درست
+        assert "رمز پذیرفته شد" in e.last() and e.db.kv_get("session_string") == "FAKE_SESSION"
+        e.close()
+
+
+def test_login_password_three_wrong_locks_out():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.text("+989120000000", mid=13)
+        e.text("11111", mid=14)
+        for i in range(3):
+            e.text("bad%d" % i, mid=20 + i)
+        assert "سه بار" in e.last() and e.bot.pending.get(CHAT) is None
+        e.close()
+
+
+def test_login_cancel_clears_state():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d), ready=False, api_id=424242, api_hash="h" * 32)
+        e.tap("acc:login")
+        e.tap("acc:cancel")
+        assert "ورود لغو شد" in e.last() and e.bot.pending.get(CHAT) is None
         e.close()
 
 
