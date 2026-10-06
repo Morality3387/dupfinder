@@ -162,6 +162,7 @@ class Scanner:
                 "♻️ نوعِ فایل‌های اسکن از «%s» به «%s» عوض شده بود ⇒ این اسکن **خودکار کامل** شد "
                 "تا فایل‌های قدیمیِ نوعِ تازه هم ایندکس شوند." % (kinds_prev, kinds_now))
         seen_ids: set = set()             # شناسهٔ پیام‌هایی که در این اسکن دیده شدند (برای پاک‌سازی)
+        istats: Dict[str, Any] = {}       # آمارِ مسیرِ پیمایش (visited/completed) از user.iter_videos
         buf: List[Dict[str, Any]] = []      # بافرِ درجِ فایل‌ها (بیرونِ try: در کنسل/خطا هم ذخیره می‌شود)
         seen = 0                            # بیرونِ try تا در کنسل/خطا هم در دسترس باشند
         found = 0
@@ -173,7 +174,8 @@ class Scanner:
             self.progress.last_msg_id = int(iter_from or 0)
             await self._emit(force=True)
             async for row in self.user.iter_videos(tg_id, min_id=iter_from, media_kinds=kinds_now,
-                                                  wait_time=float(cfg.get("scan_wait_time", 0.35) or 0)):
+                                                  wait_time=float(cfg.get("scan_wait_time", 0.35) or 0),
+                                                  stats=istats):
                 self._check()
                 row = dict(row)
                 row["channel_id"] = cid
@@ -198,15 +200,33 @@ class Scanner:
             if buf:
                 self.rehash_ids.update(self.db.upsert_files(buf).get("changed") or [])
             # فایل‌هایی که کاربر در تلگرام پاک کرده، نباید در ایندکس و گروه‌ها بمانند.
-            # شرط‌ها: اسکنِ کامل + ایندکسِ کامل‌شده (بدونِ کنسل/خطا) + حداقل یک فایلِ دیده‌شده
-            # (تا خطای گذرای شبکه باعثِ پاک‌شدنِ کلِ ایندکس نشود) + همان نوعِ فایلِ اسکن.
-            if eff_full and seen_ids and bool(cfg.get("prune_missing", True)):
+            # ملاکِ «اسکنِ سالم» جداست از «فایل پیدا شد» (باگِ گزارش‌شده): کافی است پیمایشِ
+            # کامل بدونِ خطا/کنسل تمام شده باشد — اگر کانال هیچ ویدیویی نداشته باشد،
+            # `seen_ids` خالی است و **همهٔ** رکوردهای آن نوع باید پاک شوند.
+            visited = int(istats.get("visited") or 0)
+            scan_ok = bool(eff_full and istats.get("completed") and not self._cancel.is_set())
+            empty_ok = False
+            if scan_ok and not seen_ids and visited == 0:
+                # حتی یک پیام هم پیمایش نشد: شاید کانال واقعاً خالی است، شاید دسترسی قطع شده.
+                # فقط وقتی پاک می‌کنیم که تلگرام صریحاً «هیچ پیامی نیست» را تأیید کند.
+                try:
+                    empty_ok = bool(await self.user.channel_is_empty(tg_id))
+                except Exception as e:
+                    log.info("بررسیِ خالی‌بودنِ کانال ناموفق: %s", e)
+                    empty_ok = False
+                if not empty_ok:
+                    res.notes.append(
+                        "ℹ️ هیچ فایلی در این اسکن خوانده نشد و «خالی‌بودنِ کانال» هم تأیید نشد، پس "
+                        "رکوردهای قبلی دست‌نخورده ماندند (برای اطمینان دوباره اسکن کنید).")
+            if scan_ok and (seen_ids or empty_ok) and bool(cfg.get("prune_missing", True)):
                 from .user_client import _kind_ok
                 pr = self.db.prune_missing_files(cid, seen_ids, media_kinds=kinds_now, kinds_check=_kind_ok)
                 if pr.get("files"):
                     res.notes.append(
-                        "🗑 %s رکورد که دیگر در کانال نیست از ایندکس پاک شد (فقط از دیتابیسِ ربات — "
-                        "هیچ فایلی در تلگرام حذف نمی‌شود)." % int(pr["files"]))
+                        "🗑 %s رکورد که دیگر در کانال نیست از ایندکس پاک شد%s (فقط از دیتابیسِ ربات — "
+                        "هیچ فایلی در تلگرام حذف نمی‌شود)."
+                        % (int(pr["files"]),
+                           " (کانال هیچ فایلِ واجدِ‌شرطی نداشت)" if not seen_ids else ""))
                     log.info("پاک‌سازیِ رکوردهای حذف‌شده: %s", pr)
             self.db.kv_set("scan_media_kinds:%d" % cid, kinds_now)   # برای تشخیصِ تغییر در اسکنِ بعدی
             self.progress.pct = 70.0
