@@ -92,15 +92,19 @@ def test_set_command_works_as_text_alternative():
         e.close()
 
 
-def test_admin_gets_clear_message_for_owner_only_settings():
+def test_admin_can_use_settings_and_is_blocked_only_from_owner_parts():
+    """ادمین (که کاربر با آن کار می‌کند) باید تنظیمات را ببیند و ذخیره کند."""
     with tempfile.TemporaryDirectory() as d:
         e = Env(Path(d))
         e.bot.add_admin(5001)
         e.tap("st:menu", uid=5001, chat=5001)
-        assert "مالکِ ربات" in e.last_to(5001)             # پیامِ روشن، نه سکوت
-        assert "تنظیماتِ تطبیق" not in e.last_to(5001)      # ولی ورود ندارد
-        e.text("/set hash_scope full", uid=5001, chat=5001)
-        assert "فقط مالکِ ربات" in e.last_to(5001) and e.settings.hash_scope == "sample"
+        assert "تنظیماتِ تطبیق" in e.last_to(5001)
+        e.text("/set دامنه هش کامل", uid=5001, chat=5001)
+        assert e.settings.hash_scope == "full" and "ذخیره شد" in e.last_to(5001)
+        # بخش‌های مالکانه: پیامِ روشن (نه سکوت)
+        e.tap("acc:menu", uid=5001, chat=5001)
+        assert "فقط در دستِ <b>مالکِ ربات</b> است" in e.last_to(5001)
+        assert "حسابِ کاربری" in e.last_to(5001)
         e.close()
 
 
