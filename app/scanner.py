@@ -8,13 +8,31 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import matching as M
 from . import similarity as S
 
 log = logging.getLogger("dup.scan")
+
+
+def _with_norms(files: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """اطمینان از پر بودنِ `name_norm`/`caption_norm`.
+
+    نامزدسازیِ «نام» و «کپشن» روی همین دو فیلد کار می‌کند؛ اگر برای رکوردی خالی
+    باشند (مثلاً رکوردِ قدیمیِ دیتابیس یا مسیرِ دیگری که فایل را ذخیره کرده)،
+    سیگنالِ نام بی‌صدا خاموش می‌شود ⇒ این‌جا دوباره محاسبه می‌شوند.
+    """
+    out: List[Dict[str, Any]] = []
+    for f in files or []:
+        d = dict(f)
+        if not str(d.get("name_norm") or "").strip():
+            d["name_norm"] = S.name_norm(d.get("file_name"))
+        if not str(d.get("caption_norm") or "").strip():
+            d["caption_norm"] = S.caption_norm(d.get("caption"))
+        out.append(d)
+    return out
 
 
 @dataclass
@@ -154,7 +172,7 @@ class Scanner:
             await self._emit(force=True)
 
             # ── فازِ ۲: هش‌گذاریِ نامزدها ──
-            files = self.db.files_of_channel(cid)
+            files = _with_norms(self.db.files_of_channel(cid))
             res.files = len(files)
             res.found = found
             if str(cfg.get("hash_mode") or "candidates") != "off" and files:
@@ -164,7 +182,7 @@ class Scanner:
                     self.progress.note = "هش‌گذاریِ نامزدها (دانلودِ جزئی)…"
                     await self._emit(force=True)
                     await self._hash_ids(cfg, tg_id, files, ids)
-                    files = self.db.files_of_channel(cid)
+                    files = _with_norms(self.db.files_of_channel(cid))
                     res.hashed = self.progress.hashed
             self._check()
 
@@ -200,7 +218,7 @@ class Scanner:
             res.found = found
             res.files = self.db.count_files(cid)
             try:  # نتایجِ جزئی هم بی‌فایده نباشد
-                clusters = M.find_clusters(self.db.files_of_channel(cid), cfg)
+                clusters = M.find_clusters(_with_norms(self.db.files_of_channel(cid)), cfg)
                 self.db.replace_groups(self.scan_id, cid, clusters)
                 res.groups = len(clusters)
             except Exception:
