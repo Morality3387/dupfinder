@@ -34,6 +34,15 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 
 ⚠️ <b>ربات هیچ‌چیز را پاک/ویرایش نمی‌کند</b> — فقط می‌خواند و فوروارد می‌کند. تصمیمِ پاک‌کردن کاملاً با شماست.
 
+👥 <b>ادمین‌های ربات:</b> مالک می‌تواند چند نفر را ادمین کند تا با ربات کار کنند
+(اسکن، دیدنِ نتیجه، فوروارد). «👥 ادمین‌های ربات» ← «➕ افزودنِ ادمین» و فرستادنِ <b>شناسهٔ عددی</b>
+یا یک <b>پیامِ فورواردشده از آن شخص</b>؛ دستورِ سریع: <code>/addadmin 123456789</code> ·
+حذف: <code>/deladmin 123456789</code> · فهرست: <code>/admins</code>.
+ادمین‌ها به «حسابِ کاربری»، «تنظیمات» و «مدیریتِ ادمین‌ها» دسترسی ندارند (فقط مالک).
+
+📡 <b>نامِ کانال‌ها:</b> در فهرست همیشه <b>نام</b> دیده می‌شود؛ اگر نامی از تلگرام خوانده نشده باشد
+دکمهٔ «🔄 تلاشِ دوباره برای نامِ کانال‌ها» آن را تازه می‌کند.
+
 🔎 <b>دربارهٔ دیدنِ تاریخچهٔ کامل:</b> ربات‌های معمولی (Bot API) از پست‌های <b>قبل از ادمین‌شدن‌شان</b> هیچ اطلاعی ندارند؛ در گروه‌ها هم فقط پیام‌های بعد از اضافه‌شدن. برای «<b>کلِ تاریخچه</b>» باید یک <b>حسابِ کاربری</b> وصل شود (همان حسابِ ادمینِ کانال یا یک اکانتِ مخصوصِ کار) — با دستورِ «🔑 اتصالِ حسابِ کاربری». آن‌وقت ربات از اولین پستِ کانال تا آخرین را می‌بیند. راهِ جایگزین اگر حساب نمی‌دهید: پست‌های قدیمی را در یک کانالِ آرشیو فوروارد کنید و همان را اسکن کنیم.
 """
 
@@ -60,6 +69,12 @@ class BotApp:
         self._offset = int(db.kv_get("tg_offset", 0) or 0)
         self._cmds_set = False
         self.claim_code = ""          # کدِ یک‌بارمصرفِ مالکیت (فقط وقتی OWNER_ID خالی است)
+        self.admin_ids: set = set()   # ادمین‌های ربات (به‌جز مالک) — از دیتابیس بارگذاری می‌شود
+        self.admin_names: Dict[str, str] = {}
+        self.owner_name = ""
+        self._access_seen: set = set()   # برای اینکه هر غریبه فقط یک‌بار به مالک معرفی شود
+        self._title_tries: Dict[int, float] = {}   # کول‌داونِ تلاش برای گرفتنِ نامِ کانال
+        self.title_refresh_max: int = 5            # حداکثر تلاش در هر بازکردنِ فهرست
         self.started_at = int(time.time())
         # قلابِ خواندنِ پیش‌نمایشِ عمومی (در تست‌ها با تابعِ ساختگی جایگزین می‌شود)
         self.preview_fetch = P.fetch_page
@@ -95,6 +110,163 @@ class BotApp:
             return False
         return int(uid) == int(self.owner_id)
 
+    # ── ادمین‌ها (خواستهٔ کاربر: «بتونم برای ربات ادمین اضافه کنم») ──
+    def _load_admins(self) -> None:
+        """ادمین‌های ذخیره‌شده را از دیتابیس می‌خواند (کلیدهای `admins` و `admin_names`)."""
+        try:
+            raw = self.db.kv_get("admins", "[]")
+            ids = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            self.admin_ids = {int(x) for x in ids if str(x).strip().lstrip("-").isdigit()}
+        except Exception:
+            self.admin_ids = set()
+        try:
+            raw = self.db.kv_get("admin_names", "{}")
+            names = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            self.admin_names = {str(k): str(v) for k, v in dict(names or {}).items()}
+        except Exception:
+            self.admin_names = {}
+        if self.owner_id and self.admin_names.get(str(self.owner_id)):
+            self.owner_name = self.admin_names[str(self.owner_id)]
+
+    def _save_admins(self) -> None:
+        self.db.kv_set("admins", json.dumps(sorted(self.admin_ids)))
+        self.db.kv_set("admin_names", json.dumps(self.admin_names, ensure_ascii=False))
+
+    def is_admin(self, uid: int) -> bool:
+        """مالک یا ادمینِ اضافه‌شده؟"""
+        return bool(self.owner_id and int(uid) == int(self.owner_id)) or int(uid) in self.admin_ids
+
+    async def is_allowed(self, uid: int) -> bool:
+        """دروازهٔ دسترسیِ ربات: مالک یا ادمین (بقیه رد می‌شوند)."""
+        if not self.owner_id:
+            self._ensure_claim_code()
+            return False
+        return self.is_admin(uid)
+
+    @staticmethod
+    def _display_name(u: Optional[Dict[str, Any]], uid: int = 0) -> str:
+        u = u or {}
+        name = " ".join(x for x in (str(u.get("first_name") or "").strip(),
+                                    str(u.get("last_name") or "").strip()) if x).strip()
+        uname = str(u.get("username") or "").strip().lstrip("@")
+        if name and uname:
+            return "%s (@%s)" % (name, uname)
+        return name or ("@" + uname if uname else ("کاربرِ %s" % uid))
+
+    def add_admin(self, uid: int, name: str = "") -> bool:
+        uid = int(uid)
+        if not uid or uid == int(self.owner_id or 0):
+            return False
+        self.admin_ids.add(uid)
+        if name:
+            self.admin_names[str(uid)] = str(name)
+        self._save_admins()
+        return True
+
+    def remove_admin(self, uid: int) -> bool:
+        uid = int(uid)
+        if uid not in self.admin_ids:
+            return False
+        self.admin_ids.discard(uid)
+        self.admin_names.pop(str(uid), None)
+        self._save_admins()
+        return True
+
+    async def _access_denied(self, chat: int, uid: int, m: Optional[Dict[str, Any]] = None) -> None:
+        """به غریبه «دسترسی ندارید» می‌گوید و **یک‌بار** به مالک اطلاع می‌دهد (بدونِ اسپم)."""
+        if not self.owner_id:
+            await self.api.send_message(
+                chat, "⛔️ این ربات هنوز مالک ندارد. کدِ مالکیت در <b>لاگِ سرور</b> چاپ شده؛ "
+                      "آن را این‌طور بفرستید: <code>/claim 123456</code>")
+            return
+        await self.api.send_message(
+            chat, "⛔️ دسترسی ندارید — این ربات خصوصی است.\n"
+                  "<i>اگر مالکِ ربات شما را به‌عنوانِ ادمین اضافه کند، می‌توانید از آن استفاده کنید.</i>")
+        if int(uid) in self._access_seen:
+            return
+        self._access_seen.add(int(uid))
+        name = self._display_name(((m or {}).get("from") or {}), int(uid))
+        try:
+            await self.api.send_message(
+                int(self.owner_id),
+                "🔔 <b>درخواستِ دسترسی</b>\n%s با شناسهٔ <code>%d</code> به ربات پیام داد.\n\n"
+                "اگر می‌خواهید به‌عنوانِ ادمین به ربات دسترسی داشته باشد، دکمهٔ زیر را بزنید "
+                "(یا <code>/addadmin %d</code>)." % (esc(name), int(uid), int(uid)),
+                kb=R.kb([[R.btn("➕ افزودن به‌عنوان ادمین", "own:add:%d" % int(uid))],
+                         [R.btn("👥 ادمین‌ها", "own:menu")]]))
+        except Exception as e:
+            log.info("اطلاع‌دادن به مالک ناموفق: %s", e)
+
+    # ── منوی ادمین‌ها ──
+    async def _admins_menu(self, chat: int, edit: Optional[int] = None) -> None:
+        lines = ["👥 <b>ادمین‌های ربات</b>", "",
+                 "👑 <b>مالک</b>: %s%s" % (esc(self.owner_name or "—"),
+                                          " · <code>%d</code>" % self.owner_id if self.owner_id else "")]
+        if self.admin_ids:
+            lines.append("")
+            lines.append("🛡 <b>ادمین‌ها</b> (%d):" % len(self.admin_ids))
+            for uid in sorted(self.admin_ids):
+                lines.append("• %s · <code>%d</code>" % (esc(self.admin_names.get(str(uid)) or "—"), uid))
+        else:
+            lines += ["", "<i>هنوز ادمینی اضافه نشده.</i>"]
+        lines += ["",
+                  "<b>چطور ادمین اضافه کنم؟</b>",
+                  "① اینترفیسِ زیر را بزنید و <b>شناسهٔ عددی</b> طرف را بفرستید (با <code>/id</code> خودش می‌فهمد)،",
+                  "② یا یک <b>پیامِ فورواردشده از او</b> را برای ربات بفرستید،",
+                  "③ یا وقتی غریبه‌ای به ربات پیام می‌دهد، مالک یک دکمهٔ «➕ افزودن» می‌گیرد.",
+                  "",
+                  "<i>ادمین‌ها همه‌کارهٔ اسکن/گزارش/فوروارد هستند، ولی به «حسابِ کاربری»، «تنظیمات» "
+                  "و «مدیریتِ ادمین‌ها» دسترسی ندارند.</i>"]
+        rows: List[List[Dict[str, str]]] = [[R.btn("➕ افزودنِ ادمین", "own:ask")]]
+        if self.admin_ids:
+            rows.append([R.btn("🗑 حذفِ ادمین", "own:delmenu")])
+        rows.append([R.btn("🏠 منوی اصلی", "home")])
+        if edit:
+            await self.api.edit_message_text(chat, edit, "\n".join(lines), kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, "\n".join(lines), kb=R.kb(rows))
+
+    async def _admins_del_menu(self, chat: int, edit: Optional[int] = None) -> None:
+        rows = [[R.btn("🗑 %s · %d" % ((self.admin_names.get(str(u)) or "کاربر")[:24], u), "own:del:%d" % u)]
+                for u in sorted(self.admin_ids)]
+        rows.append([R.btn("⬅️ ادمین‌ها", "own:menu")])
+        txt = "🗑 کدام ادمین حذف شود؟" if self.admin_ids else "ادمینی برای حذف نیست."
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+    async def _admin_add_by_text(self, chat: int, text: str, m: Dict[str, Any]) -> None:
+        """افزودنِ ادمین از متنِ مالک: شناسهٔ عددی یا پیامِ فورواردشده از آن کاربر."""
+        self.pending.pop(chat, None)
+        fwd_user = ((m.get("forward_origin") or {}).get("sender_user") or m.get("forward_from") or {})
+        uid = int(fwd_user.get("id") or 0) if fwd_user else 0
+        name = self._display_name(fwd_user, uid) if uid else ""
+        if not uid:
+            digits = re.sub(r"[^0-9]", "", text)
+            uid = int(digits) if digits else 0
+        if not uid:
+            await self.api.send_message(
+                chat, "❌ شناسهٔ عددی نفرستادید. مثال: <code>/addadmin 123456789</code>\n"
+                      "<i>شناسهٔ خودِ طرف را از پروفایلش (یا با <code>/id</code>) بگیرید؛ "
+                      "یا یک پیامِ فورواردشده از او بفرستید.</i>")
+            return
+        if int(uid) == int(self.owner_id or 0):
+            await self.api.send_message(chat, "ℹ️ این خودِ مالک است و از قبل همهٔ دسترسی‌ها را دارد.")
+            return
+        if not name:
+            name = self.admin_names.get(str(uid)) or ""
+        if uid in self.admin_ids:
+            await self.api.send_message(chat, "ℹ️ این کاربر از قبل ادمین است: <code>%d</code>" % uid)
+            return
+        self.add_admin(uid, name)
+        await self.api.send_message(
+            chat, "✅ <b>%s</b> به‌عنوانِ ادمینِ ربات اضافه شد (<code>%d</code>).\n"
+                  "<i>ادمین می‌تواند کانال اضافه/اسکن کند و نتیجه ببیند؛ «حسابِ کاربری» و «تنظیمات» "
+                  "فقط در دستِ مالک است.</i>" % (esc(name or "کاربر"), uid),
+            kb=R.kb([[R.btn("👥 ادمین‌ها", "own:menu")]]))
+
+    # ── مالکیتِ یک‌بارمصرف (claim) ──
     async def _try_claim_owner(self, chat: int, uid: int, text: str) -> bool:
         """`/claim <کد>` ⇒ مالک‌شدن. قبل از دروازهٔ مالکیت صدا زده می‌شود."""
         parts = text.split()
@@ -132,6 +304,7 @@ class BotApp:
             log.error("getMe ناموفق: %s", e)
         await self._set_commands()
         self._load_peer_hashes()      # access_hashهای کانال‌های خصوصی از دورهای قبل
+        self._load_admins()
         if not self.owner_id:
             self._ensure_claim_code()  # کدِ مالکیت فقط در لاگ (هرگز در چت)
         log.info("ربات آماده است (@%s)", self.bot_username)
@@ -156,6 +329,7 @@ class BotApp:
                 {"command": "channels", "description": "📡 کانال‌های من"},
                 {"command": "scanall", "description": "🔍 اسکنِ همهٔ کانال‌ها"},
                 {"command": "cancel", "description": "⏹ توقفِ اسکن"},
+                {"command": "admins", "description": "👥 ادمین‌های ربات (فقط مالک)"},
                 {"command": "history", "description": "🔎 تاریخچهٔ کامل (راهنما)"},
                 {"command": "help", "description": "❓ راهنما"}]
         try:
@@ -179,12 +353,14 @@ class BotApp:
         text = str(m.get("text") or "").strip()
         if not self.owner_id and await self._try_claim_owner(chat, uid, text):
             return
-        if not await self.is_owner(uid):
-            await self.api.send_message(
-                chat, "⛔️ این ربات خصوصی است." if self.owner_id else
-                "⛔️ این ربات هنوز مالک ندارد. کدِ مالکیت در <b>لاگِ سرور</b> چاپ شده؛ "
-                "آن را این‌طور بفرستید: <code>/claim 123456</code>")
+        if not await self.is_allowed(uid):
+            await self._access_denied(chat, uid, m)
             return
+        if self.owner_id and int(uid) == int(self.owner_id):
+            self.owner_name = self._display_name((m or {}).get("from"), int(uid)) or self.owner_name
+            if self.owner_name and self.admin_names.get(str(uid)) != self.owner_name:
+                self.admin_names[str(uid)] = self.owner_name
+                self._save_admins()
         # 📱 شمارهٔ اشتراک‌گذاشته‌شده با دکمهٔ «ارسالِ شمارهٔ من»
         contact = m.get("contact") or {}
         p_now = self.pending.get(chat)
@@ -194,6 +370,11 @@ class BotApp:
                 await self.api.send_message(chat, "❌ لطفاً شمارهٔ <b>خودتان</b> را با دکمهٔ «📱 ارسالِ شمارهٔ من» بفرستید.")
                 return
             await self._login_phone_got(chat, str(contact["phone_number"]), m)
+            return
+        # حالتِ انتظارِ «افزودنِ ادمین»: هم متن و هم پیامِ فورواردشده پذیرفته می‌شود
+        p_adm = self.pending.get(chat)
+        if p_adm and p_adm.get("kind") == "admin_add" and (self.owner_id and int(uid) == int(self.owner_id)):
+            await self._admin_add_by_text(chat, text, m)
             return
         # پیامِ فورواردشده از کانال ⇒ افزودنِ سریعِ کانال
         fwd = self._forwarded_chat(m)
@@ -263,7 +444,29 @@ class BotApp:
                      "حسابِ کاربری: %s" % ("✅ وصل" if getattr(self.user, "ready", False) else "❌ وصل نیست"),
                      "اسکنِ جاری: %s" % ("⏳ بله" if (self.scan and not self.scan.get("done")) else "—")]
             await self.api.send_message(chat, "\n".join(lines))
+        elif cmd in ("admins", "admin"):
+            if not (self.owner_id and int(uid) == int(self.owner_id)):
+                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
+                return
+            await self._admins_menu(chat)
+        elif cmd in ("addadmin", "add_admin"):
+            if not (self.owner_id and int(uid) == int(self.owner_id)):
+                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
+                return
+            await self._admin_add_by_text(chat, arg, m)
+        elif cmd in ("deladmin", "del_admin", "rmadmin"):
+            if not (self.owner_id and int(uid) == int(self.owner_id)):
+                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
+                return
+            target = int(re.sub(r"[^0-9]", "", arg) or 0)
+            if not target or not self.remove_admin(target):
+                await self.api.send_message(chat, "❌ این کاربر ادمین نیست. فهرست: /admins")
+            else:
+                await self.api.send_message(chat, "🗑 ادمین <code>%d</code> حذف شد." % target)
         elif cmd in ("setsession",):
+            if not (self.owner_id and int(uid) == int(self.owner_id)):
+                await self.api.send_message(chat, "⛔️ فقط مالکِ ربات.")
+                return
             await self._save_session_from_text(chat, arg)
         else:
             await self._menu_main(chat, uid, m)
@@ -282,14 +485,66 @@ class BotApp:
                 "<i>ربات فقط می‌خواند و فوروارد می‌کند — هیچ‌چیزی پاک نمی‌شود.</i>") % (
             st["channels"], "{:,}".format(st["files"]), "{:,}".format(st["groups"]), acc, scanning)
         rows = [[R.btn("📡 کانال‌های من", "ch:list"), R.btn("➕ افزودنِ کانال", "ch:add")],
-                [R.btn("🔑 اتصالِ حسابِ کاربری", "acc:menu"), R.btn("⚙️ تنظیمات", "st:menu")],
-                [R.btn("❓ راهنما", "help")]]
+                [R.btn("🔑 اتصالِ حسابِ کاربری", "acc:menu"), R.btn("⚙️ تنظیمات", "st:menu")]]
+        if self.owner_id and int(uid) == int(self.owner_id):
+            rows.append([R.btn("👥 ادمین‌های ربات (%d)" % len(self.admin_ids), "own:menu")])
+        rows.append([R.btn("❓ راهنما", "help")])
         if self.scan and not self.scan.get("done"):
             rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
         if m:
             await self.api.send_message(chat, text, kb=R.kb(rows))
         else:
             await self.api.send_message(chat, text, kb=R.kb(rows))
+
+    async def _refresh_channel_titles(self, chans: List[Dict[str, Any]], *, force: bool = False) -> int:
+        """نام/یوزرنیمِ کانال‌هایی که نامشان «نامعلوم/شناسه‌ای» است را از تلگرام می‌گیرد.
+
+        خواستهٔ کاربر: در فهرستِ کانال‌ها به‌جای شناسه، **نامِ کانال** دیده شود. کانال‌هایی
+        که قبلاً با شناسه ذخیره شده بودند یا هنگامِ افزودن نامشان در دسترس نبود، همین‌جا
+        (با حسابِ کاربری، وگرنه با Bot API) تازه می‌شوند و در دیتابیس ذخیره می‌گردند.
+        """
+        fixed = 0
+        attempts = 0
+        tries = self._title_tries
+        now = time.time()
+        for c in (chans or []):
+            if not force and not R.title_unknown(c):
+                continue
+            tg_id = int(c.get("tg_id") or 0)
+            if not tg_id:
+                continue
+            # ضدِ کندی/محدودیتِ تلگرام: در هر بار حداکثر `title_refresh_max` تلاش و
+            # برای هر کانال یک کول‌داونِ ۱۰ دقیقه‌ای (مگر با `force`).
+            if not force:
+                if attempts >= self.title_refresh_max:     # سقفِ تلاش در هر بازکردنِ فهرست
+                    break
+                if now - float(tries.get(tg_id, 0) or 0) < 600:
+                    continue
+            tries[tg_id] = now
+            attempts += 1
+            title = username = ""
+            if getattr(self.user, "ready", False):
+                try:
+                    info = await self.user.resolve(tg_id) or {}
+                    title = str(info.get("title") or "")
+                    username = str(info.get("username") or "")
+                except Exception as e:
+                    log.debug("resolve برای نامِ کانال ناموفق (%s): %s", tg_id, e)
+            if not title:
+                try:
+                    info = await self.api.get_chat(tg_id)
+                    title = str(info.get("title") or "")
+                    username = username or str(info.get("username") or "")
+                except Exception as e:
+                    log.debug("getChat برای نامِ کانال ناموفق (%s): %s", tg_id, e)
+            if title or username:
+                self.db.set_channel_title(int(c["id"]), title, username)
+                try:
+                    self.user.set_hint(tg_id, username=username, title=title)
+                except Exception:
+                    pass
+                fixed += 1
+        return fixed
 
     async def _channels_menu(self, chat: int) -> None:
         chans = self.db.list_channels()
@@ -303,6 +558,9 @@ class BotApp:
                 "⚠️ یادتان باشد ربات باید در کانال <b>ادمین</b> باشد.",
                 kb=R.kb([[R.btn("➕ افزودنِ کانال", "ch:add")], [R.btn("🏠 منوی اصلی", "home")]]))
             return
+        fixed = await self._refresh_channel_titles(chans)      # نام‌ها را از تلگرام تازه می‌کند
+        if fixed:
+            chans = self.db.list_channels()
         rows: List[List[Dict[str, str]]] = []
         for c in chans:
             last = self.db.last_scan(int(c["id"]))
@@ -311,9 +569,11 @@ class BotApp:
             rows.append([R.btn("%s %s" % (mark, R.channel_title(c)[:40]),
                                "c:%d" % int(c["id"]))])
         rows.append([R.btn("➕ افزودنِ کانال", "ch:add"), R.btn("🔍 اسکنِ همه", "scan:all")])
+        if any(R.title_unknown(c) for c in chans):
+            rows.append([R.btn("🔄 تلاشِ دوباره برای نامِ کانال‌ها", "ch:fix")])
         rows.append([R.btn("🏠 منوی اصلی", "home")])
-        await self.api.send_message(
-            chat, self._channels_text(chans), kb=R.kb(rows))
+        extra = ("\n<i>✨ نامِ %d کانال از تلگرام تازه شد.</i>" % fixed) if fixed else ""
+        await self.api.send_message(chat, self._channels_text(chans) + extra, kb=R.kb(rows))
 
     def _channels_text(self, chans: List[Dict[str, Any]]) -> str:
         """فهرستِ کانال‌ها با **نام** (نه شناسه) + وضعیتِ اسکن و تعدادِ فایل."""
@@ -327,6 +587,9 @@ class BotApp:
             warn = "" if self.db.kv_get("botadmin:%d" % cid) else " <i>(ادمین‌بودن تأیید نشده)</i>"
             lines.append("• <b>%s</b> — %s · %s فایل%s" % (
                 esc(R.channel_title(c)), st, "{:,}".format(self.db.count_files(cid)), warn))
+            if R.title_unknown(c):
+                lines.append("   <i>نامش از تلگرام خوانده نشد؛ «🔄 تلاشِ دوباره» را بزنید یا کانال را "
+                             "دوباره با لینک/یوزرنیم اضافه کنید.</i>")
         lines += ["", "<i>روی هر کانال بزنید تا اسکن کنید و نتیجه را ببینید.</i>"]
         return "\n".join(lines)
 
@@ -443,7 +706,7 @@ class BotApp:
                 pass
         elif tg_id:
             self.user.set_hint(int(tg_id), username=username, title=title)
-        cid = self.db.add_channel(tg_id, title or username or str(tg_id), username, kind)
+        cid = self.db.add_channel(tg_id, title or "", username, kind)
         self.pending.pop(chat, None)
         c = self.db.get_channel(cid) or {}
         warn = ""
@@ -1004,7 +1267,7 @@ class BotApp:
         if self._scan_lock.locked():
             await self.api.send_message(chat, "⏳ یک اسکن دیگر در جریان است.")
             return
-        msg = await self.api.send_message(chat, R.progress_text("index", c.get("title") or "", 0.0), kb=R.progress_kb())
+        msg = await self.api.send_message(chat, R.progress_text("index", R.channel_title(c), 0.0), kb=R.progress_kb())
         self.scan = {"chat_id": chat, "msg_id": int(msg.get("message_id") or 0), "done": False,
                      "channel": c, "cid": cid, "full": full, "started": time.time()}
 
@@ -1012,7 +1275,7 @@ class BotApp:
             if self.scan and not self.scan.get("done"):
                 try:
                     await self.api.edit_message_text(chat, self.scan["msg_id"],
-                        R.progress_text(p.phase, c.get("title") or "", p.pct, seen=p.seen, total=p.total,
+                        R.progress_text(p.phase, R.channel_title(c), p.pct, seen=p.seen, total=p.total,
                                         files=p.files, hashed=p.hashed, hash_total=p.hash_total, note=p.note,
                                         cur_id=p.last_msg_id, top_id=p.top_id),
                         kb=R.progress_kb() if p.phase not in ("done", "canceled", "error") else None)
@@ -1450,22 +1713,72 @@ class BotApp:
         uid = int((cq.get("from") or {}).get("id") or 0)
         cq_id = str(cq.get("id") or "")
         await self.api.answer_callback(cq_id)
-        if not await self.is_owner(uid):
+        if not await self.is_allowed(uid):
             await self.api.answer_callback(cq_id, "⛔️ دسترسی ندارید", alert=True)
             return
+        parts = data.split(":")
+        op = parts[0] if parts else ""
+        # عملیاتِ مالکانه: حسابِ کاربری (sessions)، تنظیماتِ تطبیق و مدیریتِ ادمین‌ها
+        owner_only_op = op in ("acc", "st", "own") or data.startswith("ch:del:")
+        if owner_only_op and not (self.owner_id and int(uid) == int(self.owner_id)):
+            await self.api.answer_callback(cq_id, "⛔️ فقط مالکِ ربات به این بخش دسترسی دارد", alert=True)
+            return
         try:
-            parts = data.split(":")
-            op = parts[0] if parts else ""
             if data == "home" or op == "home":
                 await self._menu_main(chat, uid)
             elif op == "help":
                 await self.api.send_message(chat, HELP_TEXT, kb=R.kb([[R.btn("🏠 منوی اصلی", "home")]]))
+            elif op == "own":
+                sub = parts[1] if len(parts) > 1 else "menu"
+                if sub == "menu":
+                    await self._admins_menu(chat, edit=mid)
+                elif sub == "ask":
+                    self.pending[chat] = {"kind": "admin_add"}
+                    await self.api.send_message(
+                        chat,
+                        "➕ <b>افزودنِ ادمین</b>\n\nشناسهٔ <b>عددی</b> طرف را بفرستید "
+                        "(مثال: <code>123456789</code>) یا یک <b>پیامِ فورواردشده از او</b>.\n"
+                        "<i>شناسهٔ خودش را با فرستادنِ <code>/id</code> در چتِ ربات می‌بیند.</i>",
+                        kb=R.kb([[R.btn("⬅️ ادمین‌ها", "own:menu")]]))
+                elif sub == "delmenu":
+                    await self._admins_del_menu(chat, edit=mid)
+                elif sub == "add" and len(parts) > 2:
+                    target = int(parts[2])
+                    name = self.admin_names.get(str(target)) or ""
+                    if self.add_admin(target, name):
+                        await self.api.send_message(
+                            chat, "✅ <b>%s</b> ادمین شد (<code>%d</code>)." % (esc(name or "کاربر"), target),
+                            kb=R.kb([[R.btn("👥 ادمین‌ها", "own:menu")]]))
+                    else:
+                        await self.api.send_message(chat, "ℹ️ این شناسه ادمین نشد (خودِ مالک یا نامعتبر).")
+                elif sub == "del" and len(parts) > 2:
+                    target = int(parts[2])
+                    if self.remove_admin(target):
+                        await self.api.send_message(
+                            chat, "🗑 ادمین <code>%d</code> حذف شد." % target,
+                            kb=R.kb([[R.btn("👥 ادمین‌ها", "own:menu")]]))
+                    else:
+                        await self.api.send_message(chat, "❌ این کاربر ادمین نبود.")
             elif op == "ch":
                 sub = parts[1] if len(parts) > 1 else "list"
                 if sub == "list":
                     await self._channels_menu(chat)
                 elif sub == "add":
                     await self._ask_add_channel(chat)
+                elif sub == "fix":
+                    chans = self.db.list_channels()
+                    n = await self._refresh_channel_titles(chans, force=True)
+                    if n:
+                        await self.api.send_message(chat, "✅ نامِ <b>%d</b> کانال از تلگرام تازه شد." % n)
+                    else:
+                        await self.api.send_message(
+                            chat, "⚠️ نتوانستم نامِ تازه‌ای پیدا کنم.\n"
+                                  "دلیل‌های رایج: ربات در آن کانال ادمین نیست، یا حسابِ کاربری وصل نیست.\n"
+                                  "<i>می‌توانید «🔑 اتصالِ حسابِ کاربری» کنید یا کانال را با "
+                                  "<code>@username</code> دوباره اضافه کنید.</i>",
+                            kb=R.kb([[R.btn("🔑 اتصالِ حساب", "acc:login")],
+                                     [R.btn("📡 کانال‌ها", "ch:list")]]))
+                    await self._channels_menu(chat)
                 elif sub == "del":
                     cid = int(parts[2])
                     stats = self.db.delete_channel(cid) or {}
