@@ -125,18 +125,30 @@ class Scanner:
         self._cancel = asyncio.Event()
         cid = int(channel["id"])
         tg_id = int(channel["tg_id"])
+        # اگر کاربر نوعِ فایل‌های اسکن را عوض کند (مثلاً video ⇒ all)، ایندکسِ قبلی ناقص است
+        # و ادامه‌دادن از `max_msg_id` باعث می‌شود سند/عکس‌های **قدیمی‌تر** هرگز ایندکس نشوند.
+        # پس تغییرِ `media_kinds` خودکار به «اسکنِ کامل» ارتقا داده می‌شود (باگِ گزارش‌شده).
+        kinds_now = str(cfg.get("media_kinds") or "video")
+        kinds_prev = str(self.db.kv_get("scan_media_kinds:%d" % cid) or "")
+        kinds_changed = bool(kinds_prev) and kinds_prev != kinds_now
+        eff_full = bool(full) or kinds_changed
         from_db = self.db.max_msg_id(cid)
-        since = 0 if full else from_db
+        since = 0 if eff_full else from_db
         # ۲ نکتهٔ مهمِ اسکنِ ادامه‌ای (باگِ گزارش‌شده):
         #   ① پستِ قدیمی می‌تواند **ویرایش** شود و فایلش عوض شود. اگر فقط از `max_msg_id` به بعد
         #      بخوانیم، آن پیام هرگز بازخوانی نمی‌شود و رکورد/هشِ کهنه در دیتابیس می‌ماند.
         #      پس نوکِ کانال به اندازهٔ `incr_tail` پیام عقب‌تر بازخوانی می‌شود (پیش‌فرض ۲۰۰).
         #   ② فایل‌هایی که محتوایشان عوض شده (db.upsert_files) در `self.rehash_ids` جمع می‌شوند
         #      تا حتی اگر در نامزدهای معمول نبودند، هششان از نو حساب شود.
-        tail = 0 if full else max(0, int(cfg.get("incr_tail") or 0))
-        iter_from = max(0, from_db - tail)
+        tail = 0 if eff_full else max(0, int(cfg.get("incr_tail") or 0))
+        # ⚠️ در اسکنِ کامل همیشه از صفر خوانده می‌شود؛ `from_db - tail` فقط برای «ادامه‌ای» است
+        # (باگِ واقعیِ کشف‌شده در تستِ DK-8: در اسکنِ کاملِ دوم روی همان کانال، `iter_from`
+        #  با `from_db` برابر می‌شد و هیچ پیامی بازخوانی نمی‌شد!)
+        iter_from = 0 if eff_full else max(0, from_db - tail)
         self.rehash_ids = set()
-        params = {"full": bool(full), "hash_mode": cfg.get("hash_mode"), "media_kinds": cfg.get("media_kinds"),
+        params = {"full": eff_full, "auto_full_kinds": kinds_changed,
+                  "hash_mode": cfg.get("hash_mode"), "hash_scope": cfg.get("hash_scope"),
+                  "media_kinds": kinds_now,
                   "since": since, "iter_from": iter_from, "incr_tail": tail,
                   "th_name_ratio": cfg.get("th_name_ratio"),
                   "th_name_jaccard": cfg.get("th_name_jaccard"), "th_cap_ratio": cfg.get("th_cap_ratio"),
@@ -145,6 +157,11 @@ class Scanner:
         self.scan_id = self.db.create_scan(cid, params, min_id=since)
         self.progress = Progress(phase="index", new_since=since, pct=0.0)
         res = ScanResult(scan_id=self.scan_id, channel_id=cid)
+        if kinds_changed:
+            res.notes.append(
+                "♻️ نوعِ فایل‌های اسکن از «%s» به «%s» عوض شده بود ⇒ این اسکن **خودکار کامل** شد "
+                "تا فایل‌های قدیمیِ نوعِ تازه هم ایندکس شوند." % (kinds_prev, kinds_now))
+        seen_ids: set = set()             # شناسهٔ پیام‌هایی که در این اسکن دیده شدند (برای پاک‌سازی)
         buf: List[Dict[str, Any]] = []      # بافرِ درجِ فایل‌ها (بیرونِ try: در کنسل/خطا هم ذخیره می‌شود)
         seen = 0                            # بیرونِ try تا در کنسل/خطا هم در دسترس باشند
         found = 0
@@ -155,7 +172,7 @@ class Scanner:
             self.progress.top_id = last_id
             self.progress.last_msg_id = int(iter_from or 0)
             await self._emit(force=True)
-            async for row in self.user.iter_videos(tg_id, min_id=iter_from, media_kinds=str(cfg.get("media_kinds") or "video"),
+            async for row in self.user.iter_videos(tg_id, min_id=iter_from, media_kinds=kinds_now,
                                                   wait_time=float(cfg.get("scan_wait_time", 0.35) or 0)):
                 self._check()
                 row = dict(row)
@@ -163,6 +180,7 @@ class Scanner:
                 row["name_norm"] = S.name_norm(row.get("file_name"))
                 row["caption_norm"] = S.caption_norm(row.get("caption"))
                 buf.append(row)
+                seen_ids.add(int(row.get("msg_id") or 0))
                 found += 1
                 seen += 1
                 if len(buf) >= 200:
@@ -179,6 +197,18 @@ class Scanner:
                 await self._emit()
             if buf:
                 self.rehash_ids.update(self.db.upsert_files(buf).get("changed") or [])
+            # فایل‌هایی که کاربر در تلگرام پاک کرده، نباید در ایندکس و گروه‌ها بمانند.
+            # شرط‌ها: اسکنِ کامل + ایندکسِ کامل‌شده (بدونِ کنسل/خطا) + حداقل یک فایلِ دیده‌شده
+            # (تا خطای گذرای شبکه باعثِ پاک‌شدنِ کلِ ایندکس نشود) + همان نوعِ فایلِ اسکن.
+            if eff_full and seen_ids and bool(cfg.get("prune_missing", True)):
+                from .user_client import _kind_ok
+                pr = self.db.prune_missing_files(cid, seen_ids, media_kinds=kinds_now, kinds_check=_kind_ok)
+                if pr.get("files"):
+                    res.notes.append(
+                        "🗑 %s رکورد که دیگر در کانال نیست از ایندکس پاک شد (فقط از دیتابیسِ ربات — "
+                        "هیچ فایلی در تلگرام حذف نمی‌شود)." % int(pr["files"]))
+                    log.info("پاک‌سازیِ رکوردهای حذف‌شده: %s", pr)
+            self.db.kv_set("scan_media_kinds:%d" % cid, kinds_now)   # برای تشخیصِ تغییر در اسکنِ بعدی
             self.progress.pct = 70.0
             self.progress.phase = "match"
             self.progress.note = "تحلیلِ نامزدها…"
@@ -214,6 +244,14 @@ class Scanner:
                     await self._hash_ids(cfg, tg_id, files, ids)
                     files = _with_norms(self.db.files_of_channel(cid))
                     res.hashed = self.progress.hashed
+                    if getattr(self, "hash_upgraded", 0):
+                        res.notes.append(
+                            "🔼 %s فایل با دامنهٔ قدیمی (نمونه‌ای) هش شده بود و حالا با دامنهٔ «full» "
+                            "از نو هش شد (چون تنظیمِ دامنهٔ هش عوض شده است)." % self.hash_upgraded)
+                    if getattr(self, "hash_stuck_sample", 0):
+                        res.notes.append(
+                            "ℹ️ %s فایل بزرگ‌تر از سقفِ «hash_full_max_mb» است ⇒ با هشِ نمونه‌ای ماند؛ "
+                            "برای هشِ کاملِ آن‌ها سقف را بالا ببرید." % self.hash_stuck_sample)
             self._check()
 
             # ── فازِ ۳: گروه‌بندیِ نهایی ──
@@ -327,14 +365,30 @@ class Scanner:
                         ids: Sequence[int]) -> None:
         by_id = {int(f["id"]): f for f in files}
         todo: List[Tuple[int, int]] = []      # (msg_id, size)
+        # باگِ گزارش‌شده: قبلاً فقط «بودنِ content_hash» بررسی می‌شد، پس عوض‌کردنِ
+        # `hash_scope` از sample به full هیچ‌وقت اثر نمی‌کرد و فایل‌ها با هشِ نمونه‌ای می‌ماندند.
+        # حالا **دامنهٔ ذخیره‌شده** با دامنهٔ لازم مقایسه می‌شود.
+        need_full = str(cfg.get("hash_scope") or "sample").lower() == "full"
+        full_max = max(0, int(cfg.get("hash_full_max_mb") or 0)) * 1024 * 1024
+        self.hash_upgraded = 0
+        self.hash_stuck_sample = 0
         for fid in ids:
             f = by_id.get(int(fid))
             if not f:
                 continue
-            if str(f.get("content_hash") or ""):
-                self.progress.hashed += 1
-                continue
-            todo.append((int(f["msg_id"]), int(f.get("size") or 0)))
+            size = int(f.get("size") or 0)
+            have = str(f.get("content_hash") or "")
+            sc = str(f.get("hash_scope") or "").strip().lower()
+            if have:
+                if not (need_full and sc != "full"):
+                    self.progress.hashed += 1
+                    continue                       # دامنه همان است ⇒ هشِ موجود معتبر است
+                if full_max and size > full_max:
+                    self.hash_stuck_sample += 1    # بزرگ‌تر از سقفِ هشِ کامل ⇒ تلاشِ دوباره بی‌فایده
+                    self.progress.hashed += 1
+                    continue
+                self.hash_upgraded += 1            # دامنه عوض شده ⇒ باید از نو هش شود
+            todo.append((int(f["msg_id"]), size))
         batch = 100
         for i in range(0, len(todo), batch):
             self._check()
