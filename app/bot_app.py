@@ -349,6 +349,11 @@ class BotApp:
             "{:,}".format(files), state)
         rows = [[R.btn("🔍 اسکن کامل (تاریخچهٔ کامل)", "scan:full:%d" % cid)],
                 [R.btn("🔄 ادامهٔ اسکن (فقط جدیدها)", "scan:cont:%d" % cid)]]
+        # «اسکنِ محدود» فقط برای کانال‌های **عمومی** (یوزرنیم‌دار) معنا دارد — از پیش‌نمایشِ
+        # t.me/s خوانده می‌شود؛ دکمه فقط وقتی نشان داده می‌شود که کار کند (نه دکمهٔ بی‌اثر).
+        if str(c.get("username") or "").strip():
+            rows.append([R.btn("⚠️ اسکن محدود (چند صفحهٔ آخرِ عمومی، بدونِ حجم/هش)",
+                               "scan:limited:%d" % cid)])
         if last:
             rows.append([R.btn("📊 نتیجهٔ آخرین اسکن", "s:%d:%d" % (int(last["id"]), cid)),
                          R.btn("🔁 گروه‌های تکراری", "l:%d:%d:all:0" % (int(last["id"]), cid))])
@@ -1169,8 +1174,9 @@ class BotApp:
                     if any(int(fid) in {int(all_files[i]["id"]) for i in win_idx} for fid in cl["ids"])]
         self.db.replace_groups(scan_id, cid, clusters)
         note = ("این «اسکنِ محدود» است: فقط %s صفحهٔ آخرِ کانالِ عمومی (پست‌های تازه) و فقط بر پایهٔ "
-                "کپشن/نام — حجم و هش در دسترسِ تلگرام نیست. هر گروه دستِ‌کم یک پستِ تازه دارد. "
-                "برای اسکنِ کامل، حسابِ کاربری را وصل کنید." % pages)
+                "کپشن/نام — حجم و هش در دسترسِ تلگرام نیست و **فورواردِ فایل ممکن نیست** "
+                "(از «🔗 لینکِ پیام‌ها» استفاده کنید). هر گروه دستِ‌کم یک پستِ تازه دارد. "
+                "برای نتیجهٔ کامل، حسابِ کاربری را وصل کنید." % pages)
         self.db.update_scan(scan_id, status="done", phase="done", finished_at=int(time.time()),
                             total_msgs=len(lst), seen_msgs=len(lst), files_found=len(lst),
                             hashed=0, groups_found=len(clusters),
@@ -1186,6 +1192,16 @@ class BotApp:
 
     # ═════════════════════ نتیجه‌ها ═════════════════════
     @staticmethod
+    def _scan_is_preview(scan: Dict[str, Any]) -> bool:
+        """آیا این اسکن «محدود/پیش‌نمایش» بوده؟ (پس فایل قابلِ‌فوروارد وجود ندارد)"""
+        try:
+            prm = scan.get("params")
+            data = json.loads(prm) if isinstance(prm, str) else (prm or {})
+            return str((data or {}).get("mode") or "") == "preview"
+        except Exception:
+            return False
+
+    @staticmethod
     def _scan_notes(scan: Dict[str, Any]) -> List[str]:
         """هشدارهای ذخیره‌شدهٔ اسکن (در `params` به‌صورتِ JSON نگه داشته می‌شوند)."""
         try:
@@ -1195,6 +1211,7 @@ class BotApp:
             return [str(x) for x in notes] if isinstance(notes, list) else []
         except Exception:
             return []
+
 
     def _store_notes(self, scan: Dict[str, Any], notes: Optional[List[str]]) -> None:
         """هشدارها را در `params` می‌نویسد تا در گزارش‌های بعدی هم دیده شوند."""
@@ -1261,8 +1278,13 @@ class BotApp:
             await self.api.send_message(chat, "گروه پیدا نشد.")
             return
         members = self.db.group_members(gid)
+        sc = self.db.get_scan(scan_id) or {}
+        preview = self._scan_is_preview(sc)
         txt = R.group_detail_text(c, g, members)
-        keyboard = R.group_kb(cid, scan_id, filt, page, gid)
+        if preview:
+            txt += ("\n\n<i>⚠️ نتیجهٔ «اسکنِ محدود» (پیش‌نمایشِ عمومی) است: حجم/هش در دسترس نبود؛ "
+                    "فورواردِ فایل ممکن نیست — از «🔗 لینکِ پیام‌ها» استفاده کنید.</i>")
+        keyboard = R.group_kb(cid, scan_id, filt, page, gid, can_forward=not preview)
         if edit:
             await self.api.edit_message_text(chat, edit, txt, kb=keyboard)
         else:
@@ -1273,6 +1295,15 @@ class BotApp:
         g = self.db.get_group(gid)
         c = self.db.get_channel(cid)
         if not g or not c:
+            return
+        if self._scan_is_preview(self.db.get_scan(scan_id) or {}):
+            # نتیجهٔ «اسکنِ محدود» فقط کپشن/زمان دارد (نه فایل) ⇒ فوروارد معنا ندارد
+            await self.api.send_message(
+                chat,
+                "⚠️ این گروه از «اسکنِ محدود» آمده و ربات در آن حالت به **خودِ فایل** دسترسی ندارد، "
+                "پس فوروارد ممکن نیست.\n"
+                "① «🔗 لینکِ پیام‌ها» را بزنید و در کانال ببینید، یا\n"
+                "② «🔑 اتصالِ حسابِ کاربری» و بعد «🔍 اسکن کامل» ⇒ فورواردِ تک‌کلیکی.")
             return
         members = self.db.group_members(gid)
         await self.api.send_chat_action(chat, "upload_document")
