@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (
@@ -203,6 +203,10 @@ class Db:
         """
         cid = int(cid)
         out: Dict[str, int] = {}
+        # شناسهٔ تلگرامی و اسکن‌ها را **قبل از حذف** برمی‌داریم؛ کلیدهای kv بر پایهٔ آن‌هایند
+        ch = self._one("SELECT tg_id FROM channels WHERE id=?", (cid,))
+        tg_id = int((ch["tg_id"] if ch else 0) or 0)
+        scan_ids = [int(r["id"]) for r in self._all("SELECT id FROM scans WHERE channel_id=?", (cid,))]
         rows = self._all("SELECT id FROM groups WHERE channel_id=?", (cid,))
         gids = [int(r["id"]) for r in rows]
         # اعضای گروه‌ها + خودِ گروه‌ها
@@ -219,12 +223,29 @@ class Db:
                                   "rowcount", 0) or 0)
         out["channels"] = int(getattr(self._exec("DELETE FROM channels WHERE id=?", (cid,)),
                                      "rowcount", 0) or 0)
-        # کلیدهای kv متعلق به این کانال (ادمین‌بودنِ ربات — ستونِ کلید `k` است نه `key`)
+        # کلیدهای kv متعلق به این کانال: ادمین‌بودن، هشِ دسترسی (هم با شناسهٔ کامل و هم بدونِ
+        # پیشوندِ ۱۰۰) و **همهٔ** کلیدهای فورواردِ گروه‌های اسکن‌های همین کانال
+        # (`fwd:<scan>:<gid>` و `fwd:<scan>:<gid>:off`) — قبلاً همان‌ها جا می‌ماندند.
+        # (ستونِ کلید در جدولِ kv نامش `k` است نه `key`.)
+        kv_keys = {"botadmin:%d" % cid}
+        for cand in (tg_id, abs(tg_id) if tg_id else 0, self._raw_cid(tg_id)):
+            if cand:
+                kv_keys.add("peerhash:%d" % int(cand))
+                kv_keys.add("peerhash:%s" % int(cand))
         try:
-            self._exec("DELETE FROM kv WHERE k IN (?,?,?)",
-                       ("botadmin:%d" % cid, "fwd_channel:%d" % cid, "peerhash:%d" % cid))
+            allkv = set(str(k) for k in (self.kv_all() or {}).keys())
+            for k in allkv:
+                if k in kv_keys:
+                    continue
+                for sid in scan_ids:
+                    if k == "fwd:%d" % sid or k.startswith("fwd:%d:" % sid):
+                        kv_keys.add(k)
+                        break
+            self._exec("DELETE FROM kv WHERE k IN (%s)" % ",".join("?" for _ in kv_keys),
+                       tuple(sorted(kv_keys)))
+            out["kv_keys"] = len(kv_keys)
         except Exception:
-            pass
+            out["kv_keys"] = 0
         self.conn.commit()
         return out
 
@@ -241,7 +262,56 @@ class Db:
                  "file_name", "name_norm", "caption", "caption_norm", "size", "duration", "mime",
                  "width", "height", "has_video", "protected")
 
-    def add_files(self, rows: Iterable[Dict[str, Any]]) -> int:
+    @staticmethod
+    def _raw_cid(tg_id: Any) -> int:
+        """`-1001234567890` ⇒ `1234567890` (شناسهٔ خامِ کانال)."""
+        txt = str(abs(int(tg_id or 0)))
+        return int(txt[3:]) if txt.startswith("100") else int(txt or 0)
+
+    @staticmethod
+    def _content_key(row: Dict[str, Any]) -> Tuple[int, int, str, str, int]:
+        """امضای «محتوای» یک ردیف؛ اگر عوض شود، هشِ ذخیره‌شده بی‌اعتبار است."""
+        return (int(row.get("size") or 0), int(row.get("duration") or 0),
+                str(row.get("file_name") or ""), str(row.get("file_unique_id") or ""),
+                int(row.get("doc_id") or 0))
+
+    def upsert_files(self, rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+        """درج/به‌روزرسانیِ فایل‌ها و **تشخیصِ ردیف‌هایی که محتوایشان عوض شده**.
+
+        چرا لازم است: اگر پستی ویرایش شود و فایلش جابه‌جا شود، `content_hash`/`hash_scope`
+        قدیمی نباید در دیتابیس بماند؛ وگرنه فایلِ تازه با هشِ کهنه «تکراریِ قطعی» گزارش
+        می‌شود. پس (۱) هشِ ردیف‌های تغییر‌یافته پاک می‌شود و (۲) شناسهٔ همان ردیف‌ها برمی‌گردد
+        تا اسکنر حتی اگر در نامزدهای معمول نباشند، دوباره هششان کند.
+
+        خروجی: {"n": تعدادِ ردیف‌ها، "changed": [file_id…]، "cleared": تعدادِ هشِ باطل‌شده}
+        """
+        rows = [dict(r) for r in rows if r]
+        if not rows:
+            return {"n": 0, "changed": [], "cleared": 0}
+        keys = [(int(r.get("channel_id") or 0), int(r.get("msg_id") or 0)) for r in rows]
+        by_key = {k: r for k, r in zip(keys, rows)}
+        old: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for i in range(0, len(keys), 400):
+            chunk = keys[i:i + 400]
+            q = " OR ".join("(channel_id=? AND msg_id=?)" for _ in chunk)
+            args: List[Any] = []
+            for c, m in chunk:
+                args.extend([c, m])
+            for rec in self._all(
+                    "SELECT id,channel_id,msg_id,size,duration,file_name,file_unique_id,doc_id,"
+                    "content_hash FROM files WHERE " + q, tuple(args)):
+                old[(int(rec["channel_id"]), int(rec["msg_id"]))] = dict(rec)
+        changed: List[int] = []
+        for key, row in by_key.items():
+            prev = old.get(key)
+            if not prev:
+                continue
+            if str(prev.get("content_hash") or "") and self._content_key(prev) != self._content_key(row):
+                changed.append(int(prev["id"]))
+        n = self.add_files(rows, invalidate=set(changed))
+        return {"n": n, "changed": changed, "cleared": len(changed)}
+
+    def add_files(self, rows: Iterable[Dict[str, Any]], *, invalidate: Optional[Set[int]] = None) -> int:
         rows = list(rows)
         if not rows:
             return 0
@@ -253,9 +323,18 @@ class Db:
                "caption_norm=excluded.caption_norm, size=excluded.size, duration=excluded.duration, "
                "mime=excluded.mime, width=excluded.width, height=excluded.height, "
                "has_video=excluded.has_video, protected=excluded.protected")
+        bad = sorted(int(x) for x in (invalidate or set()))
+        if bad:
+            # ردیف‌هایی که محتوایشان عوض شده ⇒ هش/دامنهٔ قدیمی پاک می‌شود تا از نو حساب شود
+            ph = ",".join("?" for _ in bad)
+            sql += (", content_hash=CASE WHEN files.id IN (%s) THEN '' ELSE files.content_hash END, "
+                    "hash_scope=CASE WHEN files.id IN (%s) THEN '' ELSE files.hash_scope END"
+                    % (ph, ph))
         vals = [tuple(r.get(c, 0) if c not in ("file_name", "name_norm", "caption", "caption_norm",
                                                "mime", "file_unique_id", "file_identify")
                       else str(r.get(c) or "") for c in self.FILE_COLS) for r in rows]
+        if bad:
+            vals = [v + tuple(bad) + tuple(bad) for v in vals]
         self.conn.executemany(sql, vals)
         self.conn.commit()
         return len(vals)
