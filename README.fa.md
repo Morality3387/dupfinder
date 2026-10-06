@@ -384,7 +384,8 @@ Dockerfile · railway.json · .env.example
 ### پیکربندیِ Railway در دستِ کد
 - `Dockerfile`: `python:3.12-slim`، `CMD python3 main.py`
 - `railway.json`: builder=DOCKERFILE، `restartPolicyType=ON_FAILURE`، healthcheck `/health`
-- `DB_PATH=/data/dup.db` + `VOLUME /data`
+- `DB_PATH=/data/dup.db` + والیومِ داشبوردی روی `/data`
+  (⚠️ دستورِ `VOLUME` در داکرفایل روی Railway خطای build می‌دهد: `dockerfile invalid: docker VOLUME … not supported` — والیوم را از داشبورد بسازید)
 
 ---
 
