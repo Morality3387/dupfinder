@@ -218,7 +218,10 @@ class Scanner:
                     res.notes.append(
                         "ℹ️ هیچ فایلی در این اسکن خوانده نشد و «خالی‌بودنِ کانال» هم تأیید نشد، پس "
                         "رکوردهای قبلی دست‌نخورده ماندند (برای اطمینان دوباره اسکن کنید).")
-            if scan_ok and (seen_ids or empty_ok) and bool(cfg.get("prune_missing", True)):
+            # کافی است پیمایش سالم انجام شده باشد: اگر حتی یک پیام هم پیمایش شد (visited>0)،
+            # `seen_ids` معتبر است — حتی اگر خالی باشد (مثلاً همهٔ ویدیوها حذف شده و فقط سند مانده).
+            # و اگر هیچ پیامی پیمایش نشد، فقط با تأییدِ «کانال خالی است» پاک می‌کنیم.
+            if scan_ok and (visited > 0 or empty_ok) and bool(cfg.get("prune_missing", True)):
                 from .user_client import _kind_ok
                 pr = self.db.prune_missing_files(cid, seen_ids, media_kinds=kinds_now, kinds_check=_kind_ok)
                 if pr.get("files"):
