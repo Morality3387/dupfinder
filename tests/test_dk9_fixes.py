@@ -258,3 +258,128 @@ def test_prune_runs_when_media_kind_disappears_but_channel_has_other_posts(tmp_p
     assert db.files_of_channel(chan["id"]) == [], "رکوردِ ویدیوهای حذف‌شده ماند"
     assert any("دیگر در کانال نیست" in n for n in (res.notes or []))
     db.close()
+
+
+# ═══════════════ DK-10: نامِ کانال و دسترسی‌های لازم ═══════════════
+def _env_with_unknown_channel(tmp, **kw):
+    """کانالی که نه Bot API می‌شناسدش و نه حسابِ کاربری ⇒ «بدون نام»."""
+    e = Env(Path(tmp), **kw)
+    cid = e.db.add_channel(-1005550001111, "", "", "channel")
+    return e, cid
+
+
+def test_unknown_channel_offers_manual_name_and_accepts_it():
+    with tempfile.TemporaryDirectory() as d:
+        e, cid = _env_with_unknown_channel(d)
+        e.tap("c:%d" % cid)
+        v = e.last_view() if e.api.edits else e.last()
+        assert "نامِ این کانال از تلگرام خوانده نشد" in v
+        btn = e.kb_btn("نامِ کانال را دستی بگذار")
+        assert btn and btn["callback_data"] == "name:%d" % cid
+        e.tap(btn["callback_data"])
+        assert "نامِ کانال" in e.last()
+        e.text("کانالِ بی‌نام من")
+        assert "کانالِ بی‌نام من" in e.last()
+        assert e.db.get_channel(cid)["title"] == "کانالِ بی‌نام من"
+        e.tap("ch:list")
+        assert "کانالِ بی‌نام من" in e.last() and "بینام" not in e.last()
+        e.close()
+
+
+def test_forwarded_post_teaches_channel_name():
+    """کاربر یک پستِ کانالِ بی‌نام را فوروارد می‌کند ⇒ نام از خودِ پیام برداشته می‌شود."""
+    with tempfile.TemporaryDirectory() as d:
+        e, cid = _env_with_unknown_channel(d)
+        m = {"chat": {"id": CHAT}, "from": {"id": OWNER}, "text": "ادامهٔ متن", "message_id": 8,
+             "forward_origin": {"type": "channel", "chat": {"id": -1005550001111,
+                                                            "title": "کانالِ ورزشی من",
+                                                            "username": "mysport"}}}
+        e.run(e.bot.handle_message(m))
+        assert "از پستِ فورواردشده خوانده شد" in e.last()
+        c = e.db.get_channel(cid)
+        assert c["title"] == "کانالِ ورزشی من" and c["username"] == "mysport"
+        e.close()
+
+
+def test_adding_by_forward_then_again_does_not_erase_name():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        e.tap("ch:add")
+        m = {"chat": {"id": CHAT}, "from": {"id": OWNER}, "text": "", "message_id": 11,
+             "forward_origin": {"type": "channel", "chat": {"id": -1007770002222,
+                                                            "title": "کانالِ فورواردی",
+                                                            "username": "fwdchan"}}}
+        e.run(e.bot.handle_message(m))
+        cid = e.db.list_channels()[-1]["id"]
+        assert e.db.get_channel(cid)["title"] == "کانالِ فورواردی"
+        # دوباره همان کانال را با شناسهٔ عددی اضافه می‌کنیم (Bot API آن را نمی‌شناسد)
+        e.tap("ch:add")
+        e.text("-1007770002222")
+        c = e.db.get_channel(cid)
+        assert c["title"] == "کانالِ فورواردی", "نامِ قبلی با نامِ خالی پاک شد"
+        assert c["username"] == "fwdchan"
+        assert str(c["id"]) == str(cid)
+        e.close()
+
+
+def test_access_check_says_bot_admin_not_needed_for_scanning():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.api.member_status[(55, 999)] = "left"            # ربات عضو/ادمینِ کانال نیست
+        e.tap("chk:%d" % cid)
+        v = e.last_view()
+        assert "⛔️ عضوِ کانال نیست" in v
+        assert "وضعیت خوب است" in v
+        assert "لازم نیست ادمین باشد" in v                 # پاسخِ صریح به پرسشِ کاربر
+        e.close()
+
+
+def test_access_check_forbids_full_history_when_account_has_no_access():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+
+        async def no_access(tg_id):
+            return {"total": 0, "last_id": 0, "title": ""}
+
+        e.user.probe = no_access                           # حسابِ کاربری چیزی نمی‌خواند
+        e.tap("chk:%d" % cid)
+        v = e.last_view()
+        assert "اسکنِ کاملِ تاریخچه کار <b>نمی‌کند</b>" in v
+        assert "عضو</b> کنید" in v and "ادمین باشد" in v    # «لازم نیست ادمین باشد؛ فقط عضو»
+        assert "کانالِ آرشیو" in v                         # راهِ جایگزینِ بدونِ عضویت
+        e.close()
+
+
+def test_access_check_reports_good_state_when_bot_admin_and_history_readable():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.tap("chk:%d" % cid)
+        v = e.last_view()
+        assert "✅ ادمینِ کانال است" in v and "تاریخچه خوانده می‌شود" in v
+        e.close()
+
+
+def test_channel_card_shows_name_warning_only_when_unknown():
+    with tempfile.TemporaryDirectory() as d:
+        e = Env(Path(d))
+        cid = e.add_channel()
+        e.tap("c:%d" % cid)
+        v = e.last_view()
+        assert "نامِ این کانال از تلگرام خوانده نشد" not in v, "برای کانالِ نام‌دار هشدارِ بی‌مورد"
+        assert e.kb_btn("✏️ نامِ کانال") is None
+        assert e.kb_btn("دسترسی‌های لازم") is not None
+        e.close()
+
+
+def test_empty_full_scan_explains_access_and_kind(tmp_path):
+    """اسکنِ کاملِ صفرفایل باید راهنمای «دسترسی/نوعِ فایل» بدهد، نه سکوت."""
+    db, user, chan = setup(tmp_path)
+    user.videos[55] = []
+    user.empty_hint = True
+    res = run(Scanner(db, user, lambda: CFG).run(chan, full=True))
+    assert res.found == 0 and res.status == "done"
+    assert any("عضوِ کانال" in n and "دسترسی‌های لازم" in n for n in (res.notes or []))
+    db.close()
