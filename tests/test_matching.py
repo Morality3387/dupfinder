@@ -201,3 +201,32 @@ def test_generic_signature_caption_is_not_a_duplicate_signal():
         r["caption_norm"] = S.caption_norm(r["caption"])
     clusters = M.find_clusters(rows, CFG)
     assert len(clusters) == 1 and clusters[0]["count"] == 3
+
+
+def test_three_plus_members_group_by_name_alone():
+    """۳+ فایل با نامِ یکسان و کیفیتِ متفاوت (حجم/زمان/کپشن متفاوت) ⇒ یک گروه.
+
+    نرمال‌سازیِ نام توکن‌های کیفیت (1080p/720p/480p) را حذف می‌کند، پس این‌ها
+    «نام مشابه» می‌شوند؛ گروه هم باید **همهٔ** اعضا را بگیرد (نه فقط دوتا).
+    """
+    from app import scanner as SC
+    rows = SC._with_norms([
+        {"id": 1, "file_name": "فیلم ایرانی تست 1080p.mkv", "size": 900_000_000, "duration": 5400},
+        {"id": 2, "file_name": "فیلم ایرانی تست 720p.mkv", "size": 500_000_000, "duration": 6000},
+        {"id": 3, "file_name": "فیلم ایرانی تست 480p.mkv", "size": 300_000_000, "duration": 6600},
+    ])
+    assert [r["name_norm"] for r in rows] == ["فیلم ایرانی تست"] * 3
+    clusters = M.find_clusters(rows, CFG)
+    assert len(clusters) == 1
+    assert clusters[0]["ids"] == [1, 2, 3]
+    assert "name" in clusters[0]["signals"]
+
+
+def test_legacy_rows_without_norm_fields_are_recovered():
+    """رکوردِ قدیمیِ دیتابیس که `name_norm` ندارد هم باید در تطبیق دیده شود."""
+    from app import scanner as SC
+    legacy = [{"id": 1, "file_name": "سریال تست قسمت ۵ 1080p.mkv", "size": 700_000_000, "duration": 2700},
+              {"id": 2, "file_name": "سریال تست قسمت 5 720p.mkv", "size": 700_100_000, "duration": 2700}]
+    assert all(not r.get("name_norm") for r in legacy)
+    clusters = M.find_clusters(SC._with_norms(legacy), CFG)
+    assert len(clusters) == 1 and clusters[0]["count"] == 2
