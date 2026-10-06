@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # دیتابیس روی والیومِ Railway (در صورتِ نبود، ./data)
+# ⚠️ دستورِ VOLUME در داکرفایل روی Railway پشتیبانی نمی‌شود (خطای build)؛
+# والیوم را از داشبورد Railway با Mount path = /data بسازید.
 ENV DB_PATH=/data/dup.db
-VOLUME ["/data"]
 
 CMD ["python3", "main.py"]
