@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (
@@ -249,6 +249,11 @@ class Db:
         self.conn.commit()
         return out
 
+    def set_channel_username(self, cid: int, username: str) -> None:
+        """به‌روزرسانیِ یوزرنیمِ کانال (مثلاً بعد از تغییرِ یوزرنیم یا برای حالتِ خصوصی)."""
+        self._exec("UPDATE channels SET username=? WHERE id=?", (str(username or "").lstrip("@"), int(cid)))
+        self.conn.commit()
+
     def set_channel_scan(self, cid: int, scan_id: int, at: int) -> None:
         self._exec("UPDATE channels SET last_scan_id=?, last_scan_at=? WHERE id=?", (scan_id, at, cid))
         self.conn.commit()
@@ -353,6 +358,11 @@ class Db:
         r = self._one("SELECT * FROM files WHERE id=?", (fid,))
         return dict(r) if r else None
 
+    def get_file_by_msg(self, channel_id: int, msg_id: int) -> Optional[Dict[str, Any]]:
+        """ردیفِ فایل با (کانال، شمارهٔ پیام) — کلیدِ یگانهٔ جدول."""
+        r = self._one("SELECT * FROM files WHERE channel_id=? AND msg_id=?", (int(channel_id), int(msg_id)))
+        return dict(r) if r else None
+
     def files_by_ids(self, ids: Sequence[int]) -> List[Dict[str, Any]]:
         if not ids:
             return []
@@ -366,6 +376,55 @@ class Db:
     def count_files(self, channel_id: int) -> int:
         r = self._one("SELECT COUNT(*) c FROM files WHERE channel_id=?", (channel_id,))
         return int((r["c"] if r else 0) or 0)
+
+    def prune_missing_files(self, channel_id: int, keep_msg_ids: Set[int], *,
+                            media_kinds: str = "video",
+                            kinds_check: Optional[Callable[[Dict[str, Any], str], bool]] = None
+                            ) -> Dict[str, int]:
+        """رکوردهای فایلی که **دیگر در کانال نیستند** را از ایندکسِ خودمان پاک می‌کند.
+
+        چرا: در اسکنِ کامل همهٔ پیام‌های فعلیِ کانال خوانده می‌شوند، ولی رکوردِ فایلی که
+        کاربر در تلگرام پاک کرده در دیتابیس می‌ماند و واردِ `find_clusters` می‌شد
+        (گزارشِ تکراری برای فایلی که وجود ندارد).
+
+        ⚠️ هیچ فایلی در تلگرام حذف نمی‌شود؛ فقط ردیفِ دیتابیسِ ربات پاک می‌شود.
+        `kinds_check` همان `_kind_ok` است تا در اسکنِ «فقط ویدیو»، رکوردهای سند/عکس
+        (که این اسکن آن‌ها را نمی‌خواند) اشتباهی پاک نشوند.
+
+        خروجی: {"files": n, "members": m, "groups": g}
+        """
+        cid = int(channel_id)
+        keep = {int(x) for x in (keep_msg_ids or set())}
+        check = kinds_check
+        if check is None:                              # بررسیِ محافظه‌کارانهٔ محلی
+            def check(row: Dict[str, Any], kind: str) -> bool:      # type: ignore[misc]
+                mime = str(row.get("mime") or "").lower()
+                if row.get("has_video") or mime.startswith("video/"):
+                    return True
+                if str(kind or "video") == "all":
+                    return True
+                if str(kind or "video") == "video+doc":
+                    return not mime.startswith(("image/", "audio/"))
+                return False
+        rows = self._all("SELECT id,msg_id,mime,has_video,file_name FROM files WHERE channel_id=?", (cid,))
+        stale = [int(r["id"]) for r in rows
+                 if int(r["msg_id"]) not in keep and bool(check(dict(r), media_kinds))]
+        out = {"files": 0, "members": 0, "groups": 0}
+        if not stale:
+            return out
+        for i in range(0, len(stale), 400):
+            chunk = stale[i:i + 400]
+            ph = ",".join("?" for _ in chunk)
+            self._exec("DELETE FROM files WHERE id IN (%s)" % ph, tuple(chunk))
+        out["files"] = len(stale)
+        out["members"] = int(getattr(self._exec(
+            "DELETE FROM group_members WHERE file_id NOT IN (SELECT id FROM files)"), "rowcount", 0) or 0)
+        out["groups"] = int(getattr(self._exec(
+            "DELETE FROM groups WHERE (SELECT COUNT(*) FROM group_members m WHERE m.group_id=groups.id) < 2"),
+            "rowcount", 0) or 0)
+        self._exec("DELETE FROM group_members WHERE group_id NOT IN (SELECT id FROM groups)")
+        self.conn.commit()
+        return out
 
     def delete_files_older_than(self, channel_id: int, msg_id: int) -> int:
         """حذفِ رکوردهای قدیمیِ یک کانال (فقط ردیف‌های دیتابیسِ خودمان — هیچ فایلی در تلگرام پاک نمی‌شود)."""
