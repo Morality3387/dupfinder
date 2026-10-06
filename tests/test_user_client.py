@@ -41,7 +41,7 @@ class Msg:
         self.message = spec.get("caption") or ""
         self.noforwards = False
         self.action = None
-        self.video = SimpleNamespace()
+        self.video = None if str(spec.get("kind") or "") == "doc" else SimpleNamespace()
         self.document = SimpleNamespace(
             id=int(spec.get("doc_id") or 0), mime_type=spec.get("mime") or "video/mp4",
             size=int(spec["size"]),
@@ -153,7 +153,8 @@ def test_probe_reads_total_and_last_id():
     ds = channel_dataset()
     uc, tg = build(ds["videos"], ds["contents"])
     info = run(uc.probe(55))
-    assert info["total"] == tg.count and info["last_id"] == 150
+    newest = max(int(r["msg_id"]) for r in ds["videos"])       # آخرین پیامِ دیتاست (نه عددِ سخت‌کد)
+    assert info["total"] == tg.count and info["last_id"] == newest
     assert info["title"] == "کانالِ تست"
     assert uc.probed == [55]
     assert uc.ready is True
@@ -258,12 +259,12 @@ def test_scanner_with_real_user_client_end_to_end(tmp_path):
     assert res.hashed >= 2 and res.groups == 4
     groups = db.groups_of_scan(res.scan_id)
     by_reason = {g["id"]: g for g in groups}
-    # گروهِ قطعی: ۱۰۱/۱۰۲ (هشِ محتوای یکسان)
-    exact = [g for g in groups if g["exact"]]
-    assert len(exact) == 1 and "هش" in exact[0]["reason"]
-    assert sorted(m["msg_id"] for m in db.group_members(exact[0]["id"])) == [101, 102]
+    # گروهِ «نمونهٔ محتوا»: ۱۰۱/۱۰۲ (هشِ سه‌تکه یکسان — قوی ولی نه قطعی)
+    content = [g for g in groups if "نمونهٔ محتوا" in g["reason"]]
+    assert len(content) == 1
+    assert sorted(m["msg_id"] for m in db.group_members(content[0]["id"])) == [101, 102]
     # گروهِ ★★★ کارفرما: ۱۳۰/۱۳۱/۱۳۲ با حجم+زمانِ یکسان
-    sizetime = [g for g in groups if "حجم و زمان" in g["reason"] and g["id"] != exact[0]["id"]]
+    sizetime = [g for g in groups if "حجم و زمان" in g["reason"] and g["id"] != content[0]["id"]]
     assert sizetime and sorted(m["msg_id"] for m in db.group_members(sizetime[0]["id"])) == [130, 131, 132]
     # قسمت‌های پشت‌سرهم نباید در یک گروه بیفتند
     for g in groups:
@@ -284,3 +285,36 @@ def test_scanner_reports_error_without_crashing_when_history_fails(tmp_path):
     assert res.status == "error" and "ITER_FAIL" in res.error
     assert db.get_scan(res.scan_id)["status"] == "error"
     db.close()
+
+
+# ───────────────────────── نوعِ فایل‌های اسکن‌شده (media_kinds) ─────────────────────────
+
+def test_media_kinds_actually_filter_documents():
+    """`video+doc` و `all` باید سند/عکس را هم بیاورند — قبلاً `msg_to_file` همه را رد می‌کرد."""
+    from app.user_client import _kind_ok
+    video = {"mime": "video/mp4", "has_video": 1, "file_name": "a.mp4"}
+    pdf = {"mime": "application/pdf", "has_video": 0, "file_name": "book.pdf"}
+    photo = {"mime": "", "has_video": 0, "has_photo": 1}
+    audio = {"mime": "audio/mpeg", "has_video": 0, "file_name": "song.mp3"}
+    assert [_kind_ok(x, "video") for x in (video, pdf, photo, audio)] == [True, False, False, False]
+    assert [_kind_ok(x, "video+doc") for x in (video, pdf, photo, audio)] == [True, True, False, False]
+    assert [_kind_ok(x, "all") for x in (video, pdf, photo, audio)] == [True, True, True, True]
+
+
+def test_full_scope_hash_is_different_from_sample_scope():
+    """هشِ کامل و نمونه‌ای نباید یکی شوند (دامنهٔ هش در محاسبه می‌آید)."""
+    from dev.fake_telegram import content_hash_of
+    data = bytes(range(256)) * 4000                       # ~۱MB
+    a = content_hash_of(data, len(data), scope="sample")
+    b = content_hash_of(data, len(data), scope="full")
+    assert a and b and a != b
+
+
+def test_full_chunk_plan_covers_whole_file():
+    from app.user_client import full_chunk_plan, FULL_CHUNK
+    size = FULL_CHUNK * 3 + 5000
+    plan = full_chunk_plan(size)
+    assert plan[0][0] == 0
+    assert all(off % 4096 == 0 for off, _ in plan)
+    assert sum(ln for _, ln in plan) >= size            # کلِ فایل پوشش داده می‌شود
+    assert plan[-1][0] + plan[-1][1] >= size
