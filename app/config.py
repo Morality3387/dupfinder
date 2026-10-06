@@ -44,6 +44,10 @@ LABELS: Dict[str, str] = {
     "size_time_require_one_exact": "حالتِ حجم/زمان: یکی دقیقاً برابر باشد",
     "hash_scope": "دامنهٔ هش: sample (سر+میانه+ته) یا full (کلِ فایل)",
     "size_pair_cap": "سقفِ جفت‌های حجمِ نزدیک برای هر فایل",
+    "duration_pair_cap": "سقفِ جفت‌های «زمانِ یکسان» در هر زنجیره (سبدِ پُر)",
+    "duration_dense_window": "پنجرهٔ حجمی داخل سبدِ زمانِ پُر (تعدادِ همسایه)",
+    "exhaustive_pairs": "بررسیِ کاملِ جفت‌ها (بدونِ سقف — کندتر ولی هیچ جفتی جا نمی‌ماند)",
+    "incr_tail": "بازخوانیِ چند پیامِ آخر در اسکنِ ادامه‌ای (برای پست‌های ویرایش‌شده)",
     "hash_full_max_mb": "سقفِ حجم برای هشِ کامل (مگابایت)",
     "preview_pages": "تعدادِ صفحه در اسکنِ محدود (هر صفحه ~۲۰ پست)",
     "preview_delay": "مکثِ بین صفحه‌های اسکنِ محدود (ثانیه)",
@@ -78,8 +82,14 @@ class Settings:
     hash_scope: str = field(default_factory=lambda: _env("HASH_SCOPE", "sample") or "sample")         # sample|full
     hash_full_max_mb: int = field(default_factory=lambda: _env_int("HASH_FULL_MAX_MB", 200))
     size_pair_cap: int = field(default_factory=lambda: _env_int("SIZE_PAIR_CAP", 240))
+    duration_pair_cap: int = field(default_factory=lambda: _env_int("DURATION_PAIR_CAP", 600))
+    duration_dense_window: int = field(default_factory=lambda: _env_int("DURATION_DENSE_WINDOW", 40))
+    exhaustive_pairs: bool = field(default_factory=lambda: _env_bool("EXHAUSTIVE_PAIRS", False))
+    # اسکنِ ادامه‌ای از `max_msg_id - incr_tail` می‌خواند تا پست‌های **ویرایش‌شده** هم دیده شوند
+    incr_tail: int = field(default_factory=lambda: _env_int("INCR_TAIL", 200))
     # ── اسکنِ محدود (بدونِ حسابِ کاربری، از پیش‌نمایشِ عمومیِ t.me/s) ──
     preview_pages: int = field(default_factory=lambda: _env_int("PREVIEW_PAGES", 6))
+    owner_claim_code: str = field(default_factory=lambda: _env("OWNER_CLAIM_CODE"))
     preview_delay: float = field(default_factory=lambda: _env_float("PREVIEW_DELAY", 1.2))
     media_kinds: str = field(default_factory=lambda: _env("MEDIA_KINDS", "video") or "video")        # video|video+doc|all
     max_forward_per_group: int = field(default_factory=lambda: _env_int("MAX_FORWARD_PER_GROUP", 12))
