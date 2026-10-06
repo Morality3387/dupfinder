@@ -13,7 +13,7 @@ from . import similarity as S
 from .config import LABELS, Settings
 from .scanner import Progress, ScanResult, Scanner
 from .tg_api import TgError, esc
-from .user_client import looks_like_phone
+from .user_client import looks_like_phone, norm_phone
 
 log = logging.getLogger("dup.bot")
 
@@ -122,6 +122,16 @@ class BotApp:
         text = str(m.get("text") or "").strip()
         if not await self.is_owner(uid):
             await self.api.send_message(chat, "⛔️ این ربات خصوصی است.")
+            return
+        # 📱 شمارهٔ اشتراک‌گذاشته‌شده با دکمهٔ «ارسالِ شمارهٔ من»
+        contact = m.get("contact") or {}
+        p_now = self.pending.get(chat)
+        if contact.get("phone_number") and p_now and p_now.get("kind") == "login_phone":
+            cu = int(contact.get("user_id") or 0)
+            if cu and cu != uid:
+                await self.api.send_message(chat, "❌ لطفاً شمارهٔ <b>خودتان</b> را با دکمهٔ «📱 ارسالِ شمارهٔ من» بفرستید.")
+                return
+            await self._login_phone_got(chat, str(contact["phone_number"]), m)
             return
         # پیامِ فورواردشده از کانال ⇒ افزودنِ سریعِ کانال
         fwd = self._forwarded_chat(m)
@@ -422,70 +432,155 @@ class BotApp:
                 [R.btn("🏠 منوی اصلی", "home")]]
         if getattr(u, "ready", False):
             rows.insert(0, [R.btn("🔌 تستِ اتصال", "acc:test"), R.btn("⛔️ قطعِ اتصال", "acc:logout")])
+        s = self.settings
+        keys_line = ("🔧 <code>api_id</code>/<code>api_hash</code>: ✅ از قبل تنظیم شده "
+                     "(فقط شماره و کد لازم است)" if (s.api_id and s.api_hash) else
+                     "🔧 <code>api_id</code>/<code>api_hash</code>: باید یک‌بار داده شوند "
+                     "(یا در Variables سرویس بگذارید)")
         await self.api.send_message(
             chat,
             "🔑 <b>حسابِ کاربری (برای تاریخچهٔ کامل)</b>\n\n"
-            "وضعیت: %s%s\n\n"
+            "وضعیت: %s%s\n%s\n\n"
             "با Bot API نمی‌شود پست‌های قبل از ادمین‌شدنِ ربات را دید. با یک حسابِ کاربری (MTProto) "
             "کلِ تاریخچه خوانده می‌شود و ربات می‌تواند از اولین پست اسکن کند.\n\n"
             "🔒 نکته‌های امنیتی: از <b>کدِ ورود و رمزِ دو مرحله‌ای</b> فقط برای همین ورود استفاده می‌شود و "
             "هیچ‌جا ذخیره نمی‌شود؛ فقط «رشتهٔ سشن» در دیتابیسِ سرویس می‌ماند (قابلِ لغو از "
-            "Telegram → Devices)." % (status, who),
+            "Telegram → Devices)." % (status, who, keys_line),
             kb=R.kb(rows))
 
+    # ── گام‌های ورود (فقط آن‌چه لازم است پرسیده می‌شود) ──
+    def _login_total(self) -> int:
+        """تعدادِ گام‌ها: برای api_id/api_hash فقط اگر تنظیم نشده باشند، + شماره + کد."""
+        s = self.settings
+        return (0 if s.api_id else 1) + (0 if s.api_hash else 1) + 2
+
     async def _login_start(self, chat: int) -> None:
-        self.pending[chat] = {"kind": "login_api_id"}
+        s = self.settings
+        p: Dict[str, Any] = {"kind": "login_api_id", "api_id": int(s.api_id or 0),
+                             "api_hash": str(s.api_hash or ""), "step": 0}
+        self.pending[chat] = p
+        total = self._login_total()
+        if p["api_id"] and p["api_hash"]:          # همه‌چیز از قبل در Variables هست
+            await self._login_ask_phone(chat, total)
+            return
+        p["step"] += 1
+        if p["api_id"]:                            # فقط api_hash می‌خواهیم
+            p["kind"] = "login_api_hash"
+            await self.api.send_message(
+                chat, "🔑 <b>گام %d از %d</b> — <code>api_hash</code> را بفرستید (۳۲ نویسه).\n"
+                      "<i>api_id از قبل تنظیم شده است.</i>" % (R.fa_digits(p["step"]), R.fa_digits(total)),
+                kb=R.kb([[R.btn("⛔️ انصراف", "acc:cancel")]]))
+            return
         await self.api.send_message(
             chat,
-            "🔑 <b>گام ۱ از ۴</b> — <code>api_id</code> را بفرستید.\n"
+            "🔑 <b>گام %d از %d</b> — <code>api_id</code> را بفرستید.\n"
             "از <a href=\"https://my.telegram.org/apps\">my.telegram.org/apps</a> بگیرید (یک عدد است).\n"
-            "اگر قبلاً سشن دارید، می‌توانید از «📋 نمایشِ رشتهٔ سشن» استفاده کنید.",
-            kb=R.kb([[R.btn("⛔️ انصراف", "acc:menu")]]))
+            "<i>اگر در Variables سرویس گذاشته باشید، این گام‌ها پریده می‌شوند.</i>"
+            % (R.fa_digits(p["step"]), R.fa_digits(total)),
+            kb=R.kb([[R.btn("⛔️ انصراف", "acc:cancel")]]))
+
+    async def _login_ask_phone(self, chat: int, total: int) -> None:
+        p = self.pending.setdefault(chat, {})
+        p["kind"] = "login_phone"
+        p["step"] = total - 1
+        await self.api.send_message(
+            chat,
+            "🔑 <b>گام %s از %s</b> — شمارهٔ همان حسابِ تلگرام.\n\n"
+            "👇 روی دکمهٔ <b>«📱 ارسالِ شمارهٔ من»</b> بزنید تا خودش برود (بدونِ تایپ)، "
+            "یا شماره را با کدِ کشور بنویسید: <code>+98912…</code>"
+            % (R.fa_digits(p["step"]), R.fa_digits(total)),
+            kb=R.reply_kb([[R.contact_btn()], [R.text_btn("⛔️ انصراف")]],
+                          placeholder="شماره را تایپ کنید یا دکمهٔ بالا را بزنید"))
+
+    async def _login_phone_got(self, chat: int, raw_phone: str, m: Optional[Dict[str, Any]] = None) -> None:
+        phone = norm_phone(raw_phone)
+        if not looks_like_phone(phone):
+            await self.api.send_message(chat, "❌ شماره نامعتبر: <code>%s</code>\nمثلِ <code>+98912…</code>"
+                                              % esc(str(raw_phone)[:30]))
+            return
+        p = self.pending.get(chat) or {}
+        p["phone"] = phone
+        if m:
+            await self._try_delete(chat, m.get("message_id"))
+        await self._login_send_code(chat, p, self._login_total())
+
+    async def _login_send_code(self, chat: int, p: Dict[str, Any], total: int, *, resend: bool = False) -> None:
+        try:
+            self.user.api_id = int(p.get("api_id") or self.settings.api_id or 0)
+            self.user.api_hash = str(p.get("api_hash") or self.settings.api_hash or "")
+            code_hash = await self.user.send_code(p["phone"])
+        except Exception as e:
+            log.warning("send_code ناموفق: %s", e)
+            await self.api.send_message(
+                chat, "❌ ارسالِ کد ناموفق: <code>%s</code>" % esc(e),
+                kb=R.kb([[R.btn("🔁 تلاشِ دوباره", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+            return
+        p["phone_code_hash"] = code_hash
+        p["kind"] = "login_code"
+        p["code_tries"] = 0
+        p["step"] = total
+        self.db.kv_set("api_id", p.get("api_id") or self.settings.api_id)
+        self.db.kv_set("api_hash", p.get("api_hash") or self.settings.api_hash)
+        head = ("🔁 <b>کدِ تازه فرستاده شد.</b>\n<i>کدِ پیامِ قبلی دیگر کار نمی‌کند.</i>"
+                if resend else "🔑 <b>گام %s از %s</b> — کدِ پیامک/تلگرام."
+                % (R.fa_digits(p["step"]), R.fa_digits(total)))
+        await self.api.send_message(
+            chat,
+            "%s\n\nکدِ ۵ رقمی را همین‌جا بفرستید (با فاصله هم می‌شود: <code>1 2 3 4 5</code>).\n"
+            "⚠️ هر بار «کدِ تازه» بزنید، <b>آخرین</b> کد معتبر است — کدِ پیامِ قبلی باطل می‌شود.\n"
+            "⏱ کد نیامد؟ «🔁 ارسالِ کدِ تازه»." % head,
+            kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+
+    @staticmethod
+    def _login_err_kind(res: Dict[str, Any]) -> str:
+        k = str(res.get("kind") or "").lower()
+        if k:
+            return k
+        low = str(res.get("error") or "").lower()
+        if "expired" in low:
+            return "expired"
+        if "flood" in low or "too many" in low:
+            return "flood"
+        if "invalid" in low:
+            return "invalid"
+        return "other"
 
     async def _login_step(self, chat: int, p: Dict[str, Any], text: str, m: Dict[str, Any]) -> None:
         kind = p["kind"]
+        total = self._login_total()
         if kind == "login_api_id":
-            if not text.isdigit():
+            if not text.isdigit() or not (1 <= len(text) <= 10):
                 await self.api.send_message(chat, "❌ api_id باید عدد باشد.")
                 return
             p["api_id"] = int(text)
-            p["kind"] = "login_api_hash"
             self.settings.api_id = p["api_id"]
-            await self.api.send_message(chat, "🔑 <b>گام ۲ از ۴</b> — <code>api_hash</code> را بفرستید (۳۲ نویسه).")
+            self.db.kv_set("api_id", p["api_id"])
             await self._try_delete(chat, m.get("message_id"))
+            p["step"] = 1 if not self.settings.api_hash else 1
+            if self.settings.api_hash:
+                await self._login_ask_phone(chat, total)
+                return
+            p["kind"] = "login_api_hash"
+            p["step"] += 1
+            await self.api.send_message(chat, "🔑 <b>گام %s از %s</b> — <code>api_hash</code> را بفرستید (۳۲ نویسه)."
+                                              % (R.fa_digits(p["step"]), R.fa_digits(total)))
             return
         if kind == "login_api_hash":
             if len(text.strip()) < 20:
-                await self.api.send_message(chat, "❌ api_hash نامعتبر.")
+                await self.api.send_message(chat, "❌ api_hash نامعتبر (۳۲ نویسه لازم است).")
                 return
             p["api_hash"] = text.strip()
-            p["kind"] = "login_phone"
             self.settings.api_hash = p["api_hash"]
-            await self._try_delete(chat, m.get("message_id"))
-            await self.api.send_message(chat, "🔑 <b>گام ۳ از ۴</b> — شمارهٔ حساب را با کدِ کشور بفرستید (مثلِ <code>+98912…</code>).")
-            return
-        if kind == "login_phone":
-            if not looks_like_phone(text):
-                await self.api.send_message(chat, "❌ شماره نامعتبر.")
-                return
-            p["phone"] = text.strip()
-            self.settings.api_hash = p["api_hash"]
-            try:
-                self.user.api_id = p["api_id"]
-                self.user.api_hash = p["api_hash"]
-                code_hash = await self.user.send_code(p["phone"])
-            except Exception as e:
-                await self.api.send_message(chat, "❌ ارسالِ کد ناموفق: <code>%s</code>" % esc(e))
-                self.pending.pop(chat, None)
-                return
-            p["phone_code_hash"] = code_hash
-            p["kind"] = "login_code"
-            self.db.kv_set("api_id", p["api_id"])
             self.db.kv_set("api_hash", p["api_hash"])
             await self._try_delete(chat, m.get("message_id"))
-            await self.api.send_message(chat, "🔑 <b>گام ۴ از ۴</b> — کدِ پیامک/تلگرام را بفرستید "
-                                             "(می‌توانید با فاصله بنویسید: <code>1 2 3 4 5</code>).\n"
-                                             "⏱ کد چند دقیقه اعتبار دارد.")
+            p["step"] = 1 if not self.settings.api_id else 1
+            await self._login_ask_phone(chat, total)
+            return
+        if kind == "login_phone":
+            if text.strip() in ("⛔️ انصراف", "انصراف", "لغو", "/cancel"):
+                await self._login_cancel(chat)
+                return
+            await self._login_phone_got(chat, text, m)
             return
         if kind == "login_code":
             await self._try_delete(chat, m.get("message_id"))
@@ -493,29 +588,82 @@ class BotApp:
             if res.get("ok"):
                 self.pending.pop(chat, None)
                 self.db.kv_set("session_string", self.user.session_string)
-                await self.api.send_message(chat, "✅ حساب وصل شد: <b>%s</b>\nاز این پس «🔍 اسکن کامل» کلِ تاریخچه را می‌خواند." % (
-                    esc((self.user.me or {}).get("name") or "")),
+                log.info("حسابِ کاربری وصل شد (id=%s)", (self.user.me or {}).get("id"))
+                await self.api.send_message(
+                    chat, "✅ حساب وصل شد: <b>%s</b>\nاز این پس «🔍 اسکن کامل» کلِ تاریخچه را می‌خواند."
+                          % esc((self.user.me or {}).get("name") or ""),
                     kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")], [R.btn("🏠 منوی اصلی", "home")]]))
                 return
-            if res.get("need_password"):
+            if res.get("need_password") or self._login_err_kind(res) == "password":
                 p["kind"] = "login_password"
-                await self.api.send_message(chat, "🔐 این حساب رمزِ دو مرحله‌ای دارد. رمز را بفرستید "
-                                                 "(بعد از ذخیره، پیامِ شما را پاک می‌کنم).")
+                p["pass_tries"] = 0
+                await self.api.send_message(
+                    chat, "🔐 <b>این حساب رمزِ دو مرحله‌ای (Two-Step) دارد.</b>\n"
+                          "رمزِ حساب را بفرستید (بعد از ذخیره، پیامتان را پاک می‌کنم).",
+                    kb=R.kb([[R.btn("⛔️ انصراف", "acc:cancel")]]))
                 return
-            await self.api.send_message(chat, "❌ ورود ناموفق: <code>%s</code>\nدوباره /start و «🔑 اتصالِ حساب»." % esc(res.get("error")))
-            self.pending.pop(chat, None)
+            ek = self._login_err_kind(res)
+            log.warning("ورود ناموفق (%s): %s", ek, res.get("error"))
+            if ek == "expired":
+                await self.api.send_message(
+                    chat, "⌛️ <b>کدِ قبلی باطل/منقضی شد</b> — این معمولاً یعنی کدِ پیامِ قبلی را زده‌اید "
+                          "یا بین دو درخواست فاصله افتاده.\nدکمهٔ <b>«🔁 ارسالِ کدِ تازه»</b> را بزنید و "
+                          "<b>آخرین</b> کد را بفرستید.",
+                    kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+                return
+            if ek == "invalid":
+                await self.api.send_message(
+                    chat, "❌ کد اشتباه است. همان آخرین کد را با دقت بفرستید، یا «🔁 ارسالِ کدِ تازه».",
+                    kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+                return
+            if ek == "flood":
+                await self.api.send_message(
+                    chat, "⏳ تلگرام موقتاً اجازهٔ درخواستِ کد نمی‌دهد (<code>%s</code>).\n"
+                          "چند دقیقه صبر کنید و بعد «🔁 ارسالِ کدِ تازه» را بزنید." % esc(res.get("error")),
+                    kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("⛔️ انصراف", "acc:cancel")]]))
+                return
+            await self.api.send_message(
+                chat, "❌ ورود ناموفق: <code>%s</code>" % esc(res.get("error")),
+                kb=R.kb([[R.btn("🔁 ارسالِ کدِ تازه", "acc:resend"), R.btn("🔑 از اول", "acc:login")]]))
             return
         if kind == "login_password":
             await self._try_delete(chat, m.get("message_id"))
+            tries = int(p.get("pass_tries") or 0) + 1
+            p["pass_tries"] = tries
             res = await self.user.sign_in_password(text)
-            self.pending.pop(chat, None)
             if res.get("ok"):
+                self.pending.pop(chat, None)
                 self.db.kv_set("session_string", self.user.session_string)
-                await self.api.send_message(chat, "✅ رمز پذیرفته شد و حساب وصل است.",
-                                            kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")], [R.btn("🏠 منوی اصلی", "home")]]))
-            else:
-                await self.api.send_message(chat, "❌ رمز اشتباه: <code>%s</code>" % esc(res.get("error")))
+                log.info("رمزِ دو مرحله‌ای پذیرفته شد؛ سشن ذخیره شد")
+                await self.api.send_message(
+                    chat, "✅ رمز پذیرفته شد و حساب وصل است.",
+                    kb=R.kb([[R.btn("📡 کانال‌ها", "ch:list")], [R.btn("🏠 منوی اصلی", "home")]]))
+                return
+            log.warning("رمز اشتباه (%s/%d): %s", tries, 3, res.get("error"))
+            if tries >= 3:
+                self.pending.pop(chat, None)
+                await self.api.send_message(
+                    chat, "❌ سه بار رمز اشتباه بود. برای امنیت، ورود لغو شد.\n"
+                          "دوباره از «🔑 اتصالِ حسابِ کاربری» شروع کنید.",
+                    kb=R.kb([[R.btn("🔑 اتصالِ حساب", "acc:login")], [R.btn("🏠 منوی اصلی", "home")]]))
+                return
+            await self.api.send_message(
+                chat, "❌ رمز اشتباه: <code>%s</code>\nتلاشِ %s از ۳ — دوباره رمز را بفرستید."
+                      % (esc(res.get("error")), R.fa_digits(tries)),
+                kb=R.kb([[R.btn("⛔️ انصراف", "acc:cancel")]]))
             return
+
+    async def _login_resend(self, chat: int) -> None:
+        p = self.pending.get(chat) or {}
+        if not p.get("phone"):
+            await self.api.send_message(chat, "⌛️ گامِ ورود منقضی شده. دوباره «🔑 اتصالِ حسابِ کاربری» را بزنید.",
+                                        kb=R.kb([[R.btn("🔑 اتصالِ حساب", "acc:login")]]))
+            return
+        await self._login_send_code(chat, p, self._login_total(), resend=True)
+
+    async def _login_cancel(self, chat: int) -> None:
+        self.pending.pop(chat, None)
+        await self.api.send_message(chat, "⛔️ ورود لغو شد.", kb=R.kb([[R.btn("🔑 حسابِ کاربری", "acc:menu")]]))
 
     async def _save_session_from_text(self, chat: int, text: str) -> None:
         s = text.strip()
@@ -763,6 +911,10 @@ class BotApp:
                     await self._account_menu(chat)
                 elif sub == "login":
                     await self._login_start(chat)
+                elif sub == "resend":
+                    await self._login_resend(chat)
+                elif sub == "cancel":
+                    await self._login_cancel(chat)
                 elif sub == "session":
                     s = self.user.session_string or ""
                     if not s:
