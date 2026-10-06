@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from difflib import SequenceMatcher
-from typing import Iterable, List, Optional, Sequence, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ۱) نرمال‌سازی
