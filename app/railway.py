@@ -6,8 +6,13 @@
 چیزی که خوانده می‌شود (تنها خواندن — هیچ‌وقت چیزی روی حساب تغییر نمی‌کند):
 
     me { email, workspaces { name, plan,
-         customer { creditBalance, currentUsage, trialDaysRemaining,
-                    isTrialing, state, billingPeriod { start, end } } } }
+         customer { creditBalance, currentUsage, remainingUsageCreditBalance,
+                    trialDaysRemaining, isTrialing, state,
+                    billingPeriod { start, end } } } }
+
+«اعتبارِ باقی‌مانده» همان عددی است که پنلِ خودِ Railway نشان می‌دهد
+(`remainingUsageCreditBalance` = اعتبارِ کل − مصرفِ این دوره)؛ پس کاربر دقیقاً
+همان چیزی را می‌بیند که در داشبورد می‌بیند.
 
 همان توکنِ «Project Access Token» که برای دیپلوی داریم با هدرِ
 `Authorization: Bearer …` برای همین پرس‌وجو هم کار می‌کند (تست‌شده).
@@ -41,6 +46,7 @@ QUERY = """query {
         id
         creditBalance
         currentUsage
+        remainingUsageCreditBalance
         trialDaysRemaining
         isTrialing
         state
@@ -82,6 +88,41 @@ def _parse_dt(text: Any) -> Optional[float]:
         return None
 
 
+def remaining_of(cust: Dict[str, Any], credit: float, usage: float) -> float:
+    """اعتبارِ باقی‌مانده — همان عددی که پنلِ Railway نشان می‌دهد.
+
+    اول از خودِ Railway می‌پرسیم (`remainingUsageCreditBalance`)؛ اگر نبود، مثلِ پنل
+    خودمان «کل − مصرف» را حساب می‌کنیم. هیچ‌وقت زیرِ صفر نمی‌رود.
+    """
+    raw = (cust or {}).get("remainingUsageCreditBalance")
+    if raw is None:
+        return max(0.0, _as_float(credit) - _as_float(usage))
+    return max(0.0, _as_float(raw))
+
+
+def used_pct(info: Dict[str, Any]) -> float:
+    """چند درصد از اعتبار مصرف شده (۰ تا ۱۰۰)."""
+    credit = _as_float((info or {}).get("credit"))
+    if credit <= 0:
+        return 0.0
+    return max(0.0, min(100.0, (_as_float((info or {}).get("usage")) / credit) * 100.0))
+
+
+def bar_text(pct: float, width: int = 10) -> str:
+    """نوارِ کوچکِ مصرف (مثل پنلِ Railway): «▰▰▱▱▱▱▱▱▱▱»."""
+    try:
+        p = max(0.0, min(100.0, float(pct)))
+    except (TypeError, ValueError):
+        p = 0.0
+    n = int(width)
+    filled = int(round(p / 100.0 * n))
+    if p > 0 and filled == 0:            # مصرف شروع شده ⇒ حداقل یک خانه، تا گمراه نکند
+        filled = 1
+    if p < 100 and filled == n:          # هنوز کامل نشده ⇒ حداقل یک خانه خالی بماند
+        filled = n - 1
+    return "▰" * filled + "▱" * max(0, n - filled)
+
+
 def summarise(raw: Dict[str, Any], *, project_id: str = "", now: Optional[float] = None) -> Dict[str, Any]:
     """پاسخِ خامِ Railway ⇒ دیکشنریِ ساده برای نمایش در ربات."""
     now = float(now if now is not None else time.time())
@@ -100,6 +141,9 @@ def summarise(raw: Dict[str, Any], *, project_id: str = "", now: Optional[float]
     start_ts = _parse_dt(period.get("start"))
     trial_days = _as_int(cust.get("trialDaysRemaining"))
     is_trial = bool(cust.get("isTrialing"))
+    credit = round(_as_float(cust.get("creditBalance")), 2)
+    usage = round(_as_float(cust.get("currentUsage")), 4)
+    left = round(remaining_of(cust, credit, usage), 2)
     days_left = trial_days if is_trial else (
         max(0, int((end_ts - now) // 86400)) if end_ts else 0)
     return {
@@ -109,8 +153,9 @@ def summarise(raw: Dict[str, Any], *, project_id: str = "", now: Optional[float]
         "workspace": str(chosen.get("name") or ""),
         "workspace_id": str(chosen.get("id") or ""),
         "plan": str(chosen.get("plan") or "").upper(),
-        "credit": round(_as_float(cust.get("creditBalance")), 2),
-        "usage": round(_as_float(cust.get("currentUsage")), 4),
+        "credit": credit,          # اعتبارِ کل (همان که ریخته‌اند)
+        "usage": usage,            # مصرفِ این دوره
+        "credit_left": left,       # 💳 باقی‌مانده — همان عددی که پنلِ ریلوی نشان می‌دهد
         "is_trial": is_trial,
         "trial_days": trial_days,
         "days_left": int(days_left),
@@ -125,7 +170,10 @@ def warn_text(info: Dict[str, Any], *, low_days: int = 5, low_credit: float = 0.
     msgs = []
     if int(info.get("days_left") or 0) <= int(low_days):
         msgs.append("فقط %d روز مانده" % int(info.get("days_left") or 0))
-    if _as_float(info.get("credit")) <= float(low_credit):
+    left = info.get("credit_left")
+    if left is None:                 # سازگاری با فراخوانی‌های قدیمی‌تر
+        left = _as_float(info.get("credit")) - _as_float(info.get("usage"))
+    if _as_float(left) <= float(low_credit):
         msgs.append("اعتبار تقریباً تمام است")
     return " · ".join(msgs)
 

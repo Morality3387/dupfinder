@@ -98,6 +98,8 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
             "railway_plan": str(rw.get("plan") or ""),
             "railway_days_left": int(rw.get("days_left") or 0),
             "railway_credit": float(rw.get("credit") or 0),
+            "railway_credit_left": float(rw.get("credit_left") or 0),
+            "railway_usage": float(rw.get("usage") or 0),
             "railway_error": str(rw.get("error") or "")[:120],
             "hash_mode": str(getattr(bot_app.settings, "hash_mode", "") or ""),
             "hash_scope": str(getattr(bot_app.settings, "hash_scope", "") or ""),

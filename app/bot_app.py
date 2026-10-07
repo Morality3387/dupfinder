@@ -863,7 +863,11 @@ class BotApp:
         return info
 
     def _rw_line(self) -> str:
-        """یک خطِ خلاصه برای صفحهٔ اصلی: طرح · اعتبارِ مانده · مصرف · روزِ مانده."""
+        """یک خطِ خلاصه برای صفحهٔ اصلی: طرح · 💳 اعتبارِ باقی‌مانده · روزِ مانده.
+
+        عددِ اعتبار همان «باقی‌مانده» است (کل منهای مصرف) — مثلِ پنلِ خودِ Railway،
+        تا یک نگاه کافی باشد و لازم نباشد مصرف را از کل کم کنید.
+        """
         if not self._rw_token():
             return "🚂 ریلوی: <i>توکن تنظیم نشده</i> — «🚂 ریلوی» را بزنید"
         info = self._rw_cached()
@@ -874,9 +878,12 @@ class BotApp:
         parts = []
         if info.get("plan"):
             parts.append("طرح <b>%s</b>" % esc(info["plan"]))
-        parts.append("اعتبارِ مانده: <b>$%.2f</b>" % float(info.get("credit") or 0))
-        if float(info.get("usage") or 0) > 0:
-            parts.append("مصرف: $%.2f" % float(info.get("usage") or 0))
+        left = float(info.get("credit_left") or 0)
+        total = float(info.get("credit") or 0)
+        credit_txt = "💳 اعتبارِ باقی‌مانده: <b>$%.2f</b>" % left
+        if total > 0:
+            credit_txt += " از $%.2f" % total
+        parts.append(credit_txt)
         if info.get("is_trial"):
             parts.append("🎁 آزمایشی")
         if info.get("days_left"):
@@ -934,8 +941,11 @@ class BotApp:
                       "🏷 طرح: <b>%s</b>%s" % (esc(info.get("plan") or "—"),
                                               " · 🎁 آزمایشی" if info.get("is_trial") else ""),
                       "🗂 ورک‌اسپیس: %s" % esc(info.get("workspace") or "—"),
-                      "💳 اعتبارِ باقی‌مانده: <b>$%.2f</b>" % float(info.get("credit") or 0),
-                      "📉 مصرفِ این دوره: <b>$%.4f</b>" % float(info.get("usage") or 0),
+                      "💳 اعتبارِ باقی‌مانده: <b>$%.2f</b> از $%.2f" % (
+                          float(info.get("credit_left") or 0), float(info.get("credit") or 0)),
+                      "📉 مصرفِ این دوره: <b>$%.4f</b> · %s <b>%s٪</b>" % (
+                          float(info.get("usage") or 0), RW.bar_text(RW.used_pct(info)),
+                          R.fa_digits("%.1f" % RW.used_pct(info))),
                       "⏳ روزِ باقی‌مانده: <b>%s</b>%s" % (R.fa_digits(int(info.get("days_left") or 0)),
                                                           " (آزمایشی)" if info.get("is_trial") else ""),
                       "🕒 آخرین بروزرسانی: %s" % esc(when)]

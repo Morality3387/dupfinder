@@ -21,7 +21,8 @@ from tests.test_bot_flow import CHAT, OWNER, Env     # noqa: E402
 
 RAW_OK = {"me": {"email": "elf-smitten-catnip@duck.com", "workspaces": [
     {"id": "e5c6b095-6ef4-46a8-99c1-fce2b653f306", "name": "morality3387's Projects", "plan": "HOBBY",
-     "customer": {"id": "c1", "creditBalance": 5, "currentUsage": 0.1, "trialDaysRemaining": 29,
+     "customer": {"id": "c1", "creditBalance": 5, "currentUsage": 0.1,
+                  "remainingUsageCreditBalance": 4.9, "trialDaysRemaining": 29,
                   "isTrialing": True, "state": "INACTIVE",
                   "billingPeriod": {"start": "2026-10-06T10:49:26.664Z", "end": "2026-10-07T23:59:59.999Z"}}}]}}
 
@@ -62,6 +63,8 @@ def test_summarise_extracts_plan_credit_and_days():
     assert info["plan"] == "HOBBY" and info["credit"] == 5.0 and info["usage"] == 0.1
     assert info["is_trial"] is True and info["days_left"] == 29
     assert info["workspace"].startswith("morality3387")
+    # 💳 «باقی‌مانده» = همان عددی که پنلِ ریلوی نشان می‌دهد (کل − مصرف)
+    assert info["credit_left"] == 4.9, info
 
 
 def test_summarise_prefers_matching_project_and_falls_back():
@@ -77,10 +80,33 @@ def test_summarise_prefers_matching_project_and_falls_back():
     assert plain["is_trial"] is False and plain["days_left"] >= 0
 
 
+def test_credit_left_uses_panel_number_and_never_goes_negative():
+    """باقی‌مانده یا از خودِ Railway می‌آید یا مثلِ پنل حساب می‌شود؛ هرگز منفی نمی‌شود."""
+    with_panel = {"me": {"workspaces": [{"id": "w", "plan": "HOBBY", "customer": {
+        "creditBalance": 5, "currentUsage": 1.25, "remainingUsageCreditBalance": 3.75}}]}}
+    assert RW.summarise(with_panel)["credit_left"] == 3.75
+    no_field = {"me": {"workspaces": [{"id": "w", "plan": "HOBBY", "customer": {
+        "creditBalance": 5, "currentUsage": 1.25}}]}}
+    assert RW.summarise(no_field)["credit_left"] == 3.75, "بی‌فیلدِ Railway ⇒ کل − مصرف"
+    over = {"me": {"workspaces": [{"id": "w", "customer": {
+        "creditBalance": 5, "currentUsage": 6.5}}]}}
+    assert RW.summarise(over)["credit_left"] == 0.0, "زیرِ صفر نمی‌رود"
+    # درصد و نوارِ مصرف (مثلِ پنل)
+    info = RW.summarise(with_panel)
+    assert 24.0 < RW.used_pct(info) < 26.0
+    bar = RW.bar_text(RW.used_pct(info))
+    assert len(bar) == 10 and bar.count("▰") == 2
+    assert RW.bar_text(2.3).count("▰") == 1, "مصرفِ کم هم باید دیده شود، نه نوارِ خالی"
+    assert RW.bar_text(0).count("▰") == 0 and RW.bar_text(100).count("▱") == 0
+
+
 def test_warn_text_flags_low_days_and_low_credit():
     assert "روز" in RW.warn_text({"days_left": 3, "credit": 4.0})
     assert "اعتبار" in RW.warn_text({"days_left": 20, "credit": 0.2})
     assert RW.warn_text({"days_left": 20, "credit": 4.0}) == ""
+    # هشدار بر پایهٔ «باقی‌مانده» است، نه اعتبارِ کل
+    assert "اعتبار" in RW.warn_text({"days_left": 20, "credit": 5.0, "credit_left": 0.2})
+    assert RW.warn_text({"days_left": 20, "credit": 5.0, "credit_left": 4.8}) == ""
 
 
 # ───────────────────────── ② توکن و صفحهٔ اصلی ─────────────────────────
@@ -95,6 +121,7 @@ def test_main_menu_shows_railway_line_from_env_token():
         e.text("/start")
         txt = e.last_view()
         assert "🚂" in txt and "5.00" in txt, txt
+        assert "$4.90" in txt, "باقی‌مانده (نه اعتبارِ کل) باید نشان داده شود: " + txt
         assert ("۲۹" in txt or "29" in txt), txt          # شمارنده‌ها فارسی نمایش داده می‌شوند
         assert "HOBBY" in txt and "آزمایشی" in txt
         assert fake.calls and "me" in fake.calls[0]["query"]
@@ -124,7 +151,9 @@ def test_railway_panel_and_token_set_from_bot_deletes_message():
         assert "5.00" in e.last_view(), "بعد از ثبتِ توکن، اطلاعات باید خوانده شود"
         # بروزرسانی و پاک‌کردن
         e.tap("rw:refresh")
-        assert "اعتبارِ باقی‌مانده" in e.last_view()
+        view = e.last_view()
+        assert "اعتبارِ باقی‌مانده" in view and "$4.90" in view and "از $5.00" in view
+        assert "٪" in view, "درصدِ مصرف (مثل پنلِ ریلوی) باید بیاید"
         e.tap("rw:clr")
         assert not e.db.kv_get("railway:token")
         assert "توکنِ ربات پاک شد" in e.last_view()
@@ -252,8 +281,10 @@ def test_startup_refresh_and_health_keys():
                 db.close()
 
     body = asyncio.new_event_loop().run_until_complete(go())
-    for k in ("railway_token", "railway_plan", "railway_days_left", "railway_credit", "railway_error"):
+    for k in ("railway_token", "railway_plan", "railway_days_left", "railway_credit",
+              "railway_credit_left", "railway_usage", "railway_error"):
         assert k in body, sorted(body)
     assert body["railway_token"] is True and body["railway_plan"] == "HOBBY"
     assert body["railway_days_left"] == 29 and body["railway_credit"] == 5.0
+    assert body["railway_credit_left"] == 4.9 and body["railway_usage"] == 0.1
     assert body["rev"] == "2026-10-07-dk18"
