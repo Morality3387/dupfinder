@@ -618,6 +618,9 @@ Dockerfile · railway.json · .env.example
 /home/user/.tools/venv/bin/python dev/railway_deploy.py --status  # دیدَنِ وضعیتِ آخرین دیپلوی
 /home/user/.tools/venv/bin/python dev/gh_push.py "پیامِ کامیت"     # آینه‌کردنِ کد روی گیت‌هاب
 ```
+- **محافظِ اسکن:** پیش از هر آپلود، خودکار `/health` خوانده می‌شود و اگر اسکنی «در جریان»
+  باشد دیپلوی انجام نمی‌شود (تا اسکنِ نصفه‌کاره از بین نرود). برای دیدنِ وضعیت:
+  `dev/railway_deploy.py --check` · برای عبورِ اجباری: `--force`.
 - توکنِ Railway فقط در `/home/user/railway.env` می‌مانَد (داخلِ ریپو نیست) و تاربالِ آپلودی هم
   `*.session` · `.env` · `*.db` · `dev/_*` را حذف می‌کند.
 - کلاینتِ رسمیِ `railway up` با «Project-Access-Token» خطای `Invalid RAILWAY_TOKEN` می‌دهد؛

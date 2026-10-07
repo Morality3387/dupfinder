@@ -121,12 +121,34 @@ def wait(deployment_id: str, timeout_s: int = 900) -> str:
     return last or "UNKNOWN"
 
 
+def scan_running(url: str = "https://dupfinder-production.up.railway.app/health") -> bool:
+    """آیا همین حالا اسکنی در جریان است؟ (تا دیپلوی، اسکنِ کاربر را نصفه نکند)
+
+    ⚠️ درسِ گرفته‌شده: یک‌بار دیپلوی وسطِ اسکنِ هشِ کامل انجام شد و اسکن از بین رفت.
+    از این به بعد دیپلوی **قبل از هر کار** این را چک می‌کند و اگر اسکنی در جریان باشد
+    کاری نمی‌کند (مگر با `--force`).
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=20) as r:
+            return bool(json.loads(r.read().decode()).get("scan_running"))
+    except Exception:
+        return False          # اگر سرور جواب نداد، جلوی دیپلوی را نمی‌گیریم
+
+
 def main() -> int:
     args = set(sys.argv[1:])
+    if "--check" in args:
+        busy = scan_running()
+        print("⏳ اسکن در جریان است ⇒ الان دیپلوی نکن." if busy else "✅ اسکنی در جریان نیست ⇒ دیپلوی بی‌خطر است.")
+        return 0
     if "--status" in args:
         did, st = latest_deployment()
         print("آخرین دیپلوی: %s → %s" % (did, st))
         return 0
+    if "--force" not in args and scan_running():
+        print("🛑 همین حالا یک اسکن در جریان است — دیپلوی می‌تواند نصفه‌اش کند. "
+              "اول اسکن تمام شود (یا برای عبورِ اجباری: --force).")
+        return 3
     print("🚀 دیپلویِ dupfinder روی Railway — نسخهٔ %s" % rev())
     res = upload()
     did = res.get("deploymentId") or ""
