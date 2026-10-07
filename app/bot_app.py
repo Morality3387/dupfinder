@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -16,8 +17,9 @@ from .scanner import Progress, ScanResult, Scanner
 from .tg_api import TgError, esc
 from .user_client import looks_like_phone, norm_digits, norm_phone
 from . import backup as B                     # 💾 DK-16: پشتیبانِ هش‌ها
+from . import gh_backup as G                  # 🗄 DK-17: پشتیبانِ گیتهاب
 
-APP_REV = "2026-10-07-dk16"                   # همان REVِ main.py (در فایلِ پشتیبان می‌آید)
+APP_REV = "2026-10-07-dk17"                   # همان REVِ main.py (در فایلِ پشتیبان می‌آید)
 
 log = logging.getLogger("dup.bot")
 
@@ -349,6 +351,7 @@ class BotApp:
         self.forward_all_budget = int(getattr(settings, "forward_all_budget", 40) or 40)
         self._scanner_factory = scanner_factory or (lambda **kw: Scanner(db, user, self.cfg_dict, **kw))
         self._stale_marked = 0        # 💾 DK-16: چند اسکنِ نیمه‌کاره در استارت «متوقف‌شده» شد
+        self.gh_transport = None      # 🗄 DK-17: برای تستِ گفتگو با گیتهاب تزریق می‌شود
         self.bot_username = ""
         self.bot_id = 0
         self._qr_task: Optional[asyncio.Task] = None
@@ -663,6 +666,20 @@ class BotApp:
         except Exception:
             return 0
 
+    def _hashes_sig(self) -> str:
+        """🖋 اثرِ انگشتِ «مجموعهٔ هش‌ها» — تا آپلودِ خودکار فقط وقتی محتوا عوض شده انجام شود."""
+        try:
+            rows = self.db._all("SELECT msg_id, content_hash FROM files WHERE content_hash<>'' ORDER BY msg_id")
+        except Exception:
+            return ""
+        h = hashlib.md5()
+        try:
+            for r in rows or []:
+                h.update(("%s:%s;" % (r["msg_id"], r["content_hash"])).encode("utf-8", "ignore"))
+        except Exception:
+            return ""
+        return h.hexdigest()
+
     def _backup_pending(self, cid: int) -> int:
         """چند هش از آخرین پشتیبانِ همین کانال تازه شده."""
         try:
@@ -731,6 +748,7 @@ class BotApp:
             return
         await self._bk_send(dest, data, name, int(cid), rep=rep, edit_prev=True)
         log.info("💾 پشتیبانِ خودکارِ کانال %s فرستاده شد (%s فایل)", cid, rep.get("count"))
+        await self._gh_auto_push()
 
     async def mark_stale_scans(self) -> int:
         """⏹ DK-16: اسکن‌هایی که با ری‌استارتِ سرور نیمه‌کاره مانده‌اند را «متوقف‌شده» می‌کند.
@@ -801,6 +819,333 @@ class BotApp:
                         "files": int(getattr(res, "files", 0) or 0)})
         return out
 
+    # ═════════════════════════ 🗄 DK-17: پشتیبانِ گیتهاب ═════════════════════════
+
+    def _gh_repo(self) -> str:
+        return str(self.db.kv_get("backup:gh_repo", "") or self.settings.gh_backup_repo or "").strip()
+
+    def _gh_path(self) -> str:
+        return str(self.db.kv_get("backup:gh_path", "") or self.settings.gh_backup_path or "backup").strip("/")
+
+    def _gh_token(self) -> str:
+        return str(self.db.kv_get("backup:gh_token", "") or self.settings.gh_backup_token or "").strip()
+
+    def _gh_key(self) -> str:
+        """رمزِ قفلِ پشتیبان: اول متغیرِ محیطی (`BACKUP_KEY`)، بعد مقدارِ ذخیره‌شده در ربات."""
+        return str(self.settings.backup_key or self.db.kv_get("backup:key", "") or "")
+
+    def _gh_auto(self) -> bool:
+        v = self.db.kv_get("backup:gh_auto", "")
+        if str(v).strip() == "":
+            return bool(self.settings.gh_backup_auto)
+        return str(v).strip().lower() not in ("0", "off", "خاموش", "false", "")
+
+    def _gh_client(self) -> G.GitHub:
+        return G.GitHub(token=self._gh_token(), repo=self._gh_repo(), path=self._gh_path(),
+                        transport=self.gh_transport)
+
+    def _gh_ready(self) -> str:
+        """اگر آماده نیست، دلیلش را می‌گوید (برای پیامِ واضح به کاربر)."""
+        if not self._gh_repo() or "/" not in self._gh_repo():
+            return "مخزنِ گیتهاب تنظیم نشده (مثلِ <code>user/repo</code>)."
+        if not self._gh_token():
+            return "توکنِ گیتهاب تنظیم نشده (⚠️ فقط در متغیرهای سرور یا همین ربات نگه دارید)."
+        if not self._gh_key():
+            return "رمزِ پشتیبان تعیین نشده — با دکمهٔ «🔑 رمزِ پشتیبان» یک رمز بگذارید."
+        return ""
+
+    @staticmethod
+    def _gh_mask(secret: str, keep: int = 4) -> str:
+        s = str(secret or "")
+        return "—" if not s else (s[:keep] + "…" + s[-2:] if len(s) > keep + 2 else "••••")
+
+    def _gh_line(self) -> str:
+        """وضعیتِ گیتهاب برای صفحهٔ پشتیبان (از حافظهٔ ربات، بدونِ درخواستِ شبکه‌ای)."""
+        if not self._gh_repo() or "/" not in self._gh_repo():
+            return "🗄 گیتهاب: <b>تنظیم نشده</b>"
+        st = str(self.db.kv_get("backup:gh:summary", "") or "")
+        at = str(self.db.kv_get("backup:gh:at", "") or "")
+        head = "🗄 گیتهاب: <code>%s/%s</code>" % (esc(self._gh_repo()), esc(self._gh_path()))
+        if not self._gh_token():
+            return head + "\n   ⚠️ توکن تنظیم نشده"
+        if not self._gh_key():
+            return head + "\n   🔑 رمزِ پشتیبان تعیین نشده"
+        return head + ("\n   📦 آخرین نسخه: %s%s" % (esc(st), " · %s" % esc(at) if at else "")
+                       if st else "\n   📦 هنوز پشتیبانی فرستاده نشده")
+
+    def _gh_note_push(self, manifest: Dict[str, Any]) -> None:
+        self.db.kv_set("backup:gh:at", time.strftime("%Y-%m-%d %H:%M"))
+        self.db.kv_set("backup:gh:summary", "%d کانال · %s فایل · %s هش" % (
+            int(manifest.get("channels") or 0), "{:,}".format(int(manifest.get("files") or 0)),
+            "{:,}".format(int(manifest.get("hashed") or 0))))
+        self.db.kv_set("backup:gh:hashed", int(manifest.get("hashed") or 0))
+        self.db.kv_set("backup:gh:sig", self._hashes_sig())
+        self.db.kv_set("backup:gh:ts", int(time.time()))
+
+    async def _gh_push(self, chat: int, *, edit: Optional[int] = None, auto: bool = False) -> bool:
+        """⬆️ ساخت + قفل + آپلودِ «عکسِ کامل» روی گیتهاب."""
+        why = self._gh_ready()
+        if why:
+            if not auto:
+                await self._bk_menu(chat, edit=edit, note="⚠️ " + why)
+            return False
+        gh = self._gh_client()
+        try:
+            res = await G.push(self.db, gh, self._gh_key(), rev=APP_REV)
+        except G.GitHubError as e:
+            log.info("آپلودِ پشتیبان به گیتهاب ناموفق: %s", e)
+            if not auto:
+                await self._bk_menu(chat, edit=edit, note="❌ %s" % esc(str(e)))
+            return False
+        except Exception as e:
+            log.info("آپلودِ پشتیبان به گیتهاب (خطای نامنتظر): %s", e)
+            if not auto:
+                await self._bk_menu(chat, edit=edit, note="❌ خطای نامنتظره: %s" % esc(str(e)))
+            return False
+        m = res.get("manifest") or {}
+        self._gh_note_push(m)
+        log.info("🗄 پشتیبان روی گیتهاب رفت (%s بایت)", res.get("bytes"))
+        if not auto:
+            await self._bk_menu(chat, edit=edit, note=(
+                "✅ <b>پشتیبان روی گیتهاب رفت</b>\n"
+                "🗄 <code>%s</code> ⇒ <code>%s/latest.bin</code> + <code>manifest.json</code>\n"
+                "📦 %d کانال · %s فایل · %s هش · حجمِ قفل‌شده: %s\n"
+                "<i>فایل رمزنگاری‌شده است؛ بدونِ «🔑 رمزِ پشتیبان» کسی (حتی در مخزنِ عمومی) محتوایش را نمی‌بیند.</i>"
+                % (esc(gh.repo), esc(gh.path), int(m.get("channels") or 0),
+                   "{:,}".format(int(m.get("files") or 0)), "{:,}".format(int(m.get("hashed") or 0)),
+                   B.human_bytes(int(m.get("bytes") or 0)))))
+        return True
+
+    async def _gh_auto_push(self) -> bool:
+        """آپلودِ خودکار بعد از اسکن — با شرط‌های محافظ (خاموشی/بی‌رمزی/تکرارِ بی‌فایده)."""
+        if not self._gh_auto() or self._gh_ready():
+            return False
+        try:
+            last = int(self.db.kv_get("backup:gh:ts", 0) or 0)
+            pushed_sig = str(self.db.kv_get("backup:gh:sig", "") or "")
+        except Exception:
+            last, pushed_sig = 0, ""
+        if pushed_sig and pushed_sig == self._hashes_sig():
+            return False                       # مجموعهٔ هش‌ها دقیقاً همان قبلی است ⇒ کامیتِ تازه لازم نیست
+        if last and (time.time() - last) < 120:
+            return False                       # ضدِ کامیتِ پشتِ‌سرهم
+        dest = self._backup_chat()
+        if not dest:
+            return False
+        return await self._gh_push(dest, auto=True)
+
+    async def _gh_info(self, chat: int, *, edit: Optional[int] = None) -> None:
+        """🔍 وضعیتِ زندهٔ پشتیبانِ روی گیتهاب (manifest — بی‌نیاز به رمز)."""
+        why = self._gh_ready()
+        gh = self._gh_client()
+        if why and "رمز" in why:                   # با توکن/مخزن ولی بی‌رمز، فقط اطلاعات می‌گیریم
+            pass
+        if not gh.configured():
+            await self._bk_menu(chat, edit=edit, note="⚠️ %s" % why)
+            return
+        try:
+            m = await G.fetch_manifest(gh)
+        except G.GitHubError as e:
+            await self._bk_menu(chat, edit=edit, note="❌ %s" % esc(str(e)))
+            return
+        if not m:
+            await self._bk_menu(chat, edit=edit, note="ℹ️ روی <code>%s</code> هنوز فایلِ پشتیبانی نیست."
+                                 % esc(gh.describe()))
+            return
+        await self._bk_menu(chat, edit=edit, note=(
+            "🔍 <b>وضعیتِ گیتهاب</b>\n🗄 <code>%s</code>\n📦 %s\n🧪 قالب: %s"
+            % (esc(gh.describe()), esc(G.human_manifest(m)), esc(str(m.get("crypto") or "")))))
+
+    async def _gh_pull_preview(self, chat: int, *, edit: Optional[int] = None) -> None:
+        """⬇️ پیش‌نمایشِ خواندن از گیتهاب (همیشه با تأییدِ کاربر)."""
+        why = self._gh_ready()
+        if why:
+            await self._bk_menu(chat, edit=edit, note="⚠️ " + why)
+            return
+        gh = self._gh_client()
+        try:
+            m = await G.fetch_manifest(gh)
+        except G.GitHubError as e:
+            await self._bk_menu(chat, edit=edit, note="❌ %s" % esc(str(e)))
+            return
+        if not m:
+            await self._bk_menu(chat, edit=edit, note="ℹ️ روی <code>%s</code> فایلِ پشتیبانی نیست."
+                                 % esc(gh.describe()))
+            return
+        rows = [[R.btn("✅ بخوان و بنشان", "bk:ghyes")], [R.btn("❌ انصراف", "bk:no")]]
+        await self.api.send_message(chat, (
+            "⬇️ <b>خواندنِ پشتیبان از گیتهاب</b>\n\n"
+            "🗄 <code>%s</code>\n📦 %s\n"
+            "🔎 این کار کانال‌ها و فایل/هش‌های موجود را <b>تکمیل</b> می‌کند (چیزی پاک نمی‌شود) "
+            "و تنظیماتِ ذخیره‌شده را که این‌جا نیستند برمی‌گرداند.\n\n"
+            "ادامه می‌دهید؟" % (esc(gh.describe()), esc(G.human_manifest(m)))), kb=R.kb(rows))
+
+    async def _gh_pull_apply(self, chat: int, *, edit: Optional[int] = None) -> None:
+        why = self._gh_ready()
+        if why:
+            await self._bk_menu(chat, edit=edit, note="⚠️ " + why)
+            return
+        gh = self._gh_client()
+        try:
+            res = await G.pull(self.db, gh, self._gh_key(), with_settings=True)
+        except G.GitHubError as e:
+            await self._bk_menu(chat, edit=edit, note="❌ %s" % esc(str(e)))
+            return
+        st = res.get("stats") or {}
+        self._gh_note_push(res.get("manifest") or {})
+        await self._bk_menu(chat, edit=edit, note=(
+            "✅ <b>پشتیبانِ گیتهاب خوانده شد</b>\n"
+            "📄 ردیف‌ها: <b>%s</b> · 🔑 هش‌ها: <b>%s</b> · 🗂 کانال‌ها: <b>%s</b>%s\n\n"
+            "<i>حالا «🔄 ادامهٔ اسکن (فقط جدیدها)» بزنید: هش‌های برگشته دوباره دانلود نمی‌شوند.</i>"
+            % ("{:,}".format(int(st.get("rows") or 0)), "{:,}".format(int(st.get("hashes") or 0)),
+               int(st.get("channels") or 0),
+               " · ⚙️ %d کلیدِ تنظیمات" % int(st.get("settings") or 0) if st.get("settings") else "")))
+
+    async def restore_from_github_if_empty(self) -> int:
+        """🚀 در استارت: اگر دیتابیس خالی است (والیومِ تازه/اکانتِ تازه)، از گیتهاب پر می‌کنیم.
+
+        این همان خواستهٔ کاربر است: «بعدِ هر دیپلوی لازم نباشد کانال‌ها و تنظیمات را دوباره وارد کنم».
+        اگر دیتابیس داده دارد، **دست نمی‌زنیم** (هیچ بازنویسیِ خودکارِ مخرب).
+        """
+        try:
+            st = self.db.stats()
+        except Exception:
+            return 0
+        if int(st.get("channels") or 0) > 0:
+            return 0
+        gh = self._gh_client()
+        if not gh.configured():
+            return 0
+        owner = int(self.owner_id or 0)
+        if not self._gh_key():
+            if owner:
+                try:
+                    await self.api.send_message(owner, (
+                        "🗄 <b>دیتابیسِ این سرور خالی است</b> و روی گیتهاب هم پشتیبان دارید\n"
+                        "<code>%s</code>\n\n"
+                        "برای برگرداندن، اول <b>«🔑 رمزِ پشتیبان»</b> را بگذارید (یا <code>BACKUP_KEY</code> "
+                        "را در متغیرهای سرور ست کنید)، بعد «💾 پشتیبانِ هش‌ها ← ⬇️ خواندن از گیتهاب»."
+                        % esc(gh.describe())), kb=R.kb([[R.btn("💾 پشتیبان‌ها", "bk:menu")]]))
+                except Exception:
+                    pass
+            return 0
+        try:
+            m = await G.fetch_manifest(gh)
+        except Exception as e:
+            log.info("manifest گیتهاب خوانده نشد: %s", e)
+            return 0
+        if not m:
+            return 0
+        try:
+            res = await G.pull(self.db, gh, self._gh_key(), with_settings=True)
+        except Exception as e:
+            log.info("بازگردانیِ خودکارِ گیتهاب ناموفق: %s", e)
+            if owner:
+                try:
+                    await self.api.send_message(owner, "❌ بازگردانیِ خودکار از گیتهاب نشد: %s" % esc(str(e)))
+                except Exception:
+                    pass
+            return 0
+        stats = res.get("stats") or {}
+        self._gh_note_push(res.get("manifest") or {})
+        n = int(stats.get("channels") or 0)
+        log.info("🚀 بازگردانیِ خودکار از گیتهاب: %s", stats)
+        if owner:
+            chans = [str(c.get("title") or c.get("tg_id")) for c in self.db.list_channels()][:8]
+            try:
+                await self.api.send_message(owner, (
+                    "🚀 <b>ربات از پشتیبانِ گیتهاب پر شد</b>\n\n"
+                    "🗂 کانال‌ها: <b>%d</b> (%s)\n📄 ردیف‌ها: <b>%s</b> · 🔑 هش‌ها: <b>%s</b>%s\n\n"
+                    "<i>لازم نیست چیزی را دستی وارد کنید؛ برای تازه‌ها «🔄 ادامهٔ اسکن (فقط جدیدها)» کافی است.</i>"
+                    % (n, esc(", ".join(chans) or "—"), "{:,}".format(int(stats.get("rows") or 0)),
+                       "{:,}".format(int(stats.get("hashes") or 0)),
+                       " · ⚙️ تنظیمات: %d کلید" % int(stats.get("settings") or 0)
+                       if stats.get("settings") else "")),
+                    kb=R.kb([[R.btn("🏠 منوی اصلی", "home")], [R.btn("💾 پشتیبان‌ها", "bk:menu")]]))
+            except Exception:
+                pass
+        return n
+
+    async def _gh_toggle_auto(self, chat: int, *, edit: Optional[int] = None) -> None:
+        now = self._gh_auto()
+        self.db.kv_set("backup:gh_auto", "0" if now else "1")
+        await self._bk_menu(chat, edit=edit, note=(
+            "🗄 آپلودِ خودکارِ گیتهاب <b>خاموش</b> شد." if now else
+            "🗄 آپلودِ خودکارِ گیتهاب <b>روشن</b> شد (پس از هر اسکنی که هشِ تازه بسازد)."))
+
+    async def _gh_ask_key(self, chat: int) -> None:
+        self.pending[chat] = {"kind": "backup_key"}
+        await self.api.send_message(chat, (
+            "🔑 <b>رمزِ پشتیبان را بفرستید</b>\n\n"
+            "این رمز، فایلِ پشتیبان را قفل می‌کند (مخزنِ گیتهاب عمومی است و نامِ فایل‌های کانال "
+            "نباید عمومی شود).\n• فقط همین‌جا نگه داشته می‌شود؛ در گیتهاب نمی‌رود.\n"
+            "• روی سرورِ تازه هم همین رمز را بدهید تا پشتیبان باز شود.\n"
+            "<i>متنِ دلخواهِ بلند (مثلِ یک جمله) امن‌تر از یک کلمهٔ کوتاه است.</i>"),
+            kb=R.kb([[R.btn("💾 پشتیبان‌ها", "bk:menu")]]))
+
+    async def _gh_ask_repo(self, chat: int) -> None:
+        self.pending[chat] = {"kind": "gh_repo"}
+        await self.api.send_message(chat, (
+            "🗄 <b>مخزنِ گیتهاب برای پشتیبان</b>\n\n"
+            "قالب: <code>owner/repo</code> و اختیاری <code>مسیر</code> — مثل:\n"
+            "<code>%s %s</code>\n\n"
+            "<i>پیش‌فرض همان مخزنِ سورس است؛ اگر می‌خواهید پشتیبان جدا باشد، یک مخزنِ دیگر بدهید.</i>"
+            % (esc(self._gh_repo() or "baddarksss/dupfinder"), esc(self._gh_path()))),
+            kb=R.kb([[R.btn("💾 پشتیبان‌ها", "bk:menu")]]))
+
+    async def _gh_ask_token(self, chat: int) -> None:
+        self.pending[chat] = {"kind": "gh_token"}
+        await self.api.send_message(chat, (
+            "🔐 <b>توکنِ گیتهاب را بفرستید</b>\n\n"
+            "یک توکنِ fine-grained با دسترسیِ <b>Contents: Read and write</b> فقط روی همین مخزن کافی است.\n"
+            "• پیامی که می‌فرستید، بلافاصله از چت <b>حذف</b> می‌شود.\n"
+            "• بهتر است در سرور به‌جای این کار، متغیر <code>GH_BACKUP_TOKEN</code> را ست کنید.\n"
+            "<i>برای برداشتنِ توکنِ ذخیره‌شده بنویسید: پاک</i>"),
+            kb=R.kb([[R.btn("💾 پشتیبان‌ها", "bk:menu")]]))
+
+    async def _gh_set_key(self, chat: int, text: str) -> None:
+        val = str(text or "").strip()
+        if len(val) < 4:
+            await self.api.send_message(chat, "⚠️ رمز خیلی کوتاه است؛ حداقل ۴ نویسه بفرستید.")
+            return
+        self.pending.pop(chat, None)
+        self.db.kv_set("backup:key", val)
+        await self._bk_menu(chat, note=(
+            "✅ رمزِ پشتیبان ثبت شد (<code>%s</code>).\n"
+            "⚠️ همین رمز را جایی امن نگه دارید: برای برگرداندنِ پشتیبان روی سرورِ تازه لازم می‌شود."
+            % esc(self._gh_mask(val))))
+
+    async def _gh_set_repo(self, chat: int, text: str) -> None:
+        parts = str(text or "").split()
+        repo = parts[0] if parts else ""
+        path = (parts[1] if len(parts) > 1 else self._gh_path()).strip("/")
+        if "/" not in repo:
+            await self.api.send_message(chat, "⚠️ قالبِ درست: <code>owner/repo</code> (مثلاً "
+                                              "<code>%s</code>)" % esc(self._gh_repo() or "baddarksss/dupfinder"))
+            return
+        self.pending.pop(chat, None)
+        self.db.kv_set("backup:gh_repo", repo)
+        self.db.kv_set("backup:gh_path", path or "backup")
+        await self._bk_menu(chat, note="✅ مخزنِ پشتیبان: <code>%s/%s</code>" % (esc(repo), esc(path or "backup")))
+
+    async def _gh_set_token(self, chat: int, text: str, m: Dict[str, Any]) -> None:
+        val = str(text or "").strip()
+        self.pending.pop(chat, None)
+        if val.strip().lower() in ("پاک", "حذف", "پاکش کن", "clear", "delete", "remove", "-"):
+            self.db.kv_set("backup:gh_token", "")
+            await self._bk_menu(chat, note="🗑 توکنِ ذخیره‌شده در ربات پاک شد.")
+            return
+        if len(val) < 20:
+            await self.api.send_message(chat, "⚠️ این شبیه توکن نیست (خیلی کوتاه است).")
+            return
+        self.db.kv_set("backup:gh_token", val)
+        try:                                   # پیامِ حاویِ توکن از چت پاک می‌شود
+            await self.api.delete_message(int(chat), int((m or {}).get("message_id") or 0))
+        except Exception:
+            pass
+        await self._bk_menu(chat, note="✅ توکنِ گیتهاب ثبت شد (<code>%s</code>) و پیامِ توکن از چت پاک شد."
+                             % esc(self._gh_mask(val)))
+
     async def _bk_menu(self, chat: int, *, edit: Optional[int] = None, note: str = "") -> None:
         """صفحهٔ «💾 پشتیبانِ هش‌ها» — فرستادنِ نسخه و بازگرداندن."""
         st = self.db.stats()
@@ -818,7 +1163,8 @@ class BotApp:
                   "📤 چتِ پشتیبان: %s" % ("<b>همین چت</b>" if not self.db.kv_get("backup:chat", "") else
                                            "شناسهٔ <code>%s</code>" % self._backup_chat()),
                   "🔄 خودکار پس از هر اسکن (اگر هشِ تازه باشد): %s"
-                  % ("<b>روشن ✅</b>" if self._backup_auto() else "<b>خاموش ⛔</b>")]
+                  % ("<b>روشن ✅</b>" if self._backup_auto() else "<b>خاموش ⛔</b>"),
+                  self._gh_line()]
         if pend:
             lines += ["", "⚠️ از آخرین پشتیبانِ این‌ها هشِ تازه اضافه شده — یک‌بار «📤» را بزنید:",
                       *["• <b>%s</b> — %d هشِ تازه" % (esc(c.get("title") or c.get("tg_id")), n)
@@ -836,6 +1182,13 @@ class BotApp:
         if str(self.db.kv_get("backup:chat", "") or "").strip() != str(int(chat)):
             rows.append([R.btn("📥 پشتیبان‌ها در همین چت نگه داشته شوند", "bk:chat")])
         rows.append([R.btn("🔄 خودکار: %s" % ("روشن ✅" if self._backup_auto() else "خاموش ⛔"), "bk:auto")])
+        gh_ok = bool(self._gh_repo() and "/" in self._gh_repo() and self._gh_token())
+        rows.append([R.btn("⬆️ فرستادن به گیتهاب" + ("" if gh_ok else " (تنظیم نشده)"), "bk:ghup"),
+                     R.btn("⬇️ خواندن از گیتهاب", "bk:ghdown")])
+        rows.append([R.btn("🔍 وضعیتِ گیتهاب", "bk:ghinfo"),
+                     R.btn("🗄 خودکارِ گیتهاب: %s" % ("✅" if self._gh_auto() else "⛔"), "bk:ghauto")])
+        rows.append([R.btn("🔑 رمزِ پشتیبان" + (" ✅" if self._gh_key() else ""), "bk:key"),
+                     R.btn("🗄 تنظیمِ مقصد", "bk:ghset"), R.btn("🔐 توکنِ گیتهاب", "bk:gttok")])
         rows.append([R.btn("⚙️ تنظیمات", "st:menu"), R.btn("🏠 منوی اصلی", "home")])
         txt = "\n".join(lines)
         if edit:
@@ -937,7 +1290,10 @@ class BotApp:
         if st["scope"] == "snapshot":
             plan = B.import_plan(self.db, payload)
             pv = B.import_preview(plan)
-            lines.append("روی این ربات: <b>%d</b> کانال پیدا شد" % pv["channels"])
+            will_create = sum(1 for i in (plan.get("items") or []) if i.get("create"))
+            lines.append("روی این ربات: <b>%d</b> کانال پیدا شد%s"
+                         % (pv["channels"], " · 🗂 <b>%d</b> کانالِ تازه ساخته می‌شود" % will_create
+                            if will_create else ""))
             if pv["missing"]:
                 lines.append("⚠️ این کانال‌ها هنوز به ربات اضافه نشده‌اند: %s"
                              % esc(", ".join(str(x.get("title") or x.get("tg_id")) for x in pv["missing"])))
@@ -946,8 +1302,11 @@ class BotApp:
         else:
             plan = B.import_plan(self.db, payload, fallback_channel_id=0)
             pv = B.import_preview(plan)
+            will_create = sum(1 for i in (plan.get("items") or []) if i.get("create"))
             lines.append("روی این ربات: %s" % ("<b>کانال پیدا شد ✅</b>" if pv["channels"] else
-                                              "<b>کانال پیدا نشد ⚠️</b> (اول با «➕ افزودنِ کانال» اضافه‌اش کنید)"))
+                                              ("🗂 <b>کانالِ تازه ساخته می‌شود</b> (شناسه‌اش در پشتیبان هست)"
+                                               if will_create else
+                                               "<b>کانال پیدا نشد ⚠️</b> (اول با «➕ افزودنِ کانال» اضافه‌اش کنید)")))
             lines.append("پیش‌بینی: %s ردیفِ تازه · %s هش نوشته می‌شود"
                          % ("{:,}".format(pv["new"]), "{:,}".format(pv["fills"])))
         lines += ["", "<i>هیچ فایل و گروهی پاک نمی‌شود؛ فقط ایندکس و هش‌ها نوشته می‌شوند.</i>"]
@@ -973,16 +1332,17 @@ class BotApp:
             await self.pending.pop(chat, None) if False else None
             await self._bk_menu(chat, edit=edit, note="⚠️ %s" % esc(str(e)))
             return
-        plan = B.import_plan(self.db, payload)
+        plan = B.import_plan(self.db, payload, auto_create=True)
         stat = B.apply_import(self.db, plan, with_settings=bool(with_settings))
         self.pending.pop(chat, None)
         title = str((payload.get("channel") or {}).get("title") or "")
         note = ("✅ <b>بازگرداندن تمام شد</b>\n"
                 "🗂 کانال: <b>%s</b>\n"
-                "📄 ردیف‌های نوشته‌شده: <b>%s</b> · 🔑 هش‌های برگشته: <b>%s</b>%s%s"
+                "📄 ردیف‌های نوشته‌شده: <b>%s</b> · 🔑 هش‌های برگشته: <b>%s</b>%s%s%s"
                 % (esc(title or "همهٔ کانال‌ها"), "{:,}".format(stat["rows"]),
                    "{:,}".format(stat["hashes"]),
                    " · ⚙️ تنظیمات: <b>%d</b> کلید" % stat["settings"] if stat.get("settings") else "",
+                   " · 🗂 %d کانالِ تازه ساخته شد" % stat["created"] if stat.get("created") else "",
                    " · ⚠️ %d کانال پیدا نشد" % stat["missing"] if stat.get("missing") else ""))
         note += "\n\n<i>حالا «🔄 ادامهٔ اسکن (فقط جدیدها)» بزنید: هشِ فایل‌های برگشته دیگر دانلود نمی‌شود.</i>"
         await self._bk_menu(chat, edit=edit, note=note)
@@ -1105,6 +1465,15 @@ class BotApp:
                 return
             if p["kind"] == "check_target":                 # 📤 مقصدِ «گروهِ چک» با تایپ
                 await self._apply_setting(chat, "check_target", text)
+                return
+            if p["kind"] == "backup_key":                  # 🔑 رمزِ قفلِ پشتیبان
+                await self._gh_set_key(chat, text)
+                return
+            if p["kind"] == "gh_repo":                     # 🗄 مخزنِ پشتیبان
+                await self._gh_set_repo(chat, text)
+                return
+            if p["kind"] == "gh_token":                    # 🔐 توکنِ گیتهاب
+                await self._gh_set_token(chat, text, m)
                 return
             if p["kind"].startswith("login_"):
                 await self._login_step(chat, p, text, m)
@@ -3569,6 +3938,22 @@ class BotApp:
                     self.db.kv_set("backup:chat", str(int(chat)))
                     await self._bk_menu(chat, edit=mid,
                                         note="✅ از این به بعد فایل‌های پشتیبان در <b>همین چت</b> نگه داشته می‌شوند.")
+                elif sub == "ghup":
+                    await self._gh_push(chat, edit=mid)
+                elif sub == "ghdown":
+                    await self._gh_pull_preview(chat, edit=mid)
+                elif sub == "ghyes":
+                    await self._gh_pull_apply(chat, edit=mid)
+                elif sub == "ghinfo":
+                    await self._gh_info(chat, edit=mid)
+                elif sub == "ghauto":
+                    await self._gh_toggle_auto(chat, edit=mid)
+                elif sub == "key":
+                    await self._gh_ask_key(chat)
+                elif sub == "ghset":
+                    await self._gh_ask_repo(chat)
+                elif sub == "gttok":
+                    await self._gh_ask_token(chat)
                 elif sub == "auto":
                     await self._bk_auto_toggle(chat, edit=mid)
                 elif sub == "yes":

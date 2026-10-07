@@ -294,6 +294,6 @@ def test_health_endpoint_reports_scan_and_hash_details():
     for k in ("ok", "rev", "files", "hashed", "hash_full", "hash_sample", "hash_mode", "hash_scope",
               "hash_full_max_mb", "stale_scans", "scan_running", "scan_state"):
         assert k in body, "کلیدِ «%s» در /health نیست: %s" % (k, sorted(body))
-    assert body["rev"] == "2026-10-07-dk16"
+    assert body["rev"] == "2026-10-07-dk17"
     assert body["hash_mode"] == "all" and body["hash_scope"] == "full"
     assert body["scan_state"] == "idle" and body["stale_scans"] == 0

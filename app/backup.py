@@ -273,7 +273,8 @@ def human_bytes(n: Any) -> str:
 
 # ────────────────────────────── بازگرداندن ──────────────────────────────
 
-def import_plan(db: Any, payload: Dict[str, Any], *, fallback_channel_id: int = 0) -> Dict[str, Any]:
+def import_plan(db: Any, payload: Dict[str, Any], *, fallback_channel_id: int = 0,
+                auto_create: bool = False) -> Dict[str, Any]:
     """نقشهٔ بازگرداندن: هر بلوکِ کانال + کانالِ مقصدش روی این ربات + آمارِ پیش‌بینی‌شده."""
     items: List[Dict[str, Any]] = []
     missing: List[Dict[str, Any]] = []
@@ -287,7 +288,10 @@ def import_plan(db: Any, payload: Dict[str, Any], *, fallback_channel_id: int = 
         target = search_channel(db, meta)
         if not target and not payload.get("scope") == "snapshot" and fallback_channel_id:
             target = db.get_channel(int(fallback_channel_id))
-        item: Dict[str, Any] = {"meta": meta, "rows": rows, "target": target,
+        # اگر کانال روی این ربات نیست ولی شناسهٔ تلگرامش را داریم، خودمان می‌سازیمش.
+        # این همان چیزی است که کاربر خواست: «بعدِ هر دیپلوی لازم نباشد کانال‌ها را دوباره وارد کنم».
+        will_create = bool(auto_create and not target and int(meta.get("tg_id") or 0))
+        item: Dict[str, Any] = {"meta": meta, "rows": rows, "target": target, "create": will_create,
                                 "new": len(rows), "fills": 0, "updates": 0}
         if target:
             known = {(int(f.get("msg_id") or 0)): str(f.get("content_hash") or "")
@@ -304,11 +308,15 @@ def import_plan(db: Any, payload: Dict[str, Any], *, fallback_channel_id: int = 
                         fills += 1
                     upd += 1
             item.update({"new": new, "fills": fills, "updates": upd})
+        elif will_create:
+            item.update({"new": len(rows), "fills": sum(1 for r in rows if str(r.get("content_hash") or "")),
+                         "updates": 0})
         else:
             missing.append(meta)
         items.append(item)
     return {"kind": "channel" if payload.get("scope") != "snapshot" else "snapshot",
-            "items": items, "missing": missing, "settings": payload.get("settings") or {}}
+            "items": items, "missing": missing, "settings": payload.get("settings") or {},
+            "auto_create": bool(auto_create)}
 
 
 def import_preview(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -325,9 +333,22 @@ def import_preview(plan: Dict[str, Any]) -> Dict[str, Any]:
 
 def apply_import(db: Any, plan: Dict[str, Any], *, with_settings: bool = False) -> Dict[str, Any]:
     """اجرای بازگرداندن: ردیف‌ها در می‌آیند و هش‌ها روی همان ردیف‌ها نوشته می‌شوند."""
-    stat = {"channels": 0, "rows": 0, "new": 0, "hashes": 0, "settings": 0, "missing": len(plan.get("missing") or [])}
+    stat = {"channels": 0, "rows": 0, "new": 0, "hashes": 0, "settings": 0, "created": 0,
+            "missing": len(plan.get("missing") or [])}
     for item in plan.get("items") or []:
         target = item.get("target")
+        if not target and item.get("create"):
+            meta = item.get("meta") or {}
+            try:
+                new_id = db.add_channel(int(meta.get("tg_id") or 0), title=str(meta.get("title") or ""),
+                                        username=str(meta.get("username") or ""),
+                                        kind=str(meta.get("kind") or "channel"))
+                target = db.get_channel(int(new_id)) if new_id else None
+                item["target"] = target
+                if target:
+                    stat["created"] += 1
+            except Exception:
+                target = None
         if not target:
             continue
         cid = int(target["id"])

@@ -24,7 +24,7 @@ from app.user_client import UserClient  # noqa: E402
 
 log = logging.getLogger("dup")
 _STARTED_AT = time.time()          # برای uptime_s در /health (قبلاً اشتباهاً از ساعتِ monotonic خوانده می‌شد)
-REV = "2026-10-07-dk16"             # برچسبِ نسخه (در /health دیده می‌شود)
+REV = "2026-10-07-dk17"             # برچسبِ نسخه (در /health دیده می‌شود)
 
 
 def uptime_seconds() -> int:
@@ -64,6 +64,7 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
 
     async def handle(_req):
         st = db.stats()
+        kv_gh = db.kv_all()
         scan = bot_app.scan or {}
         body = {
             "ok": True,
@@ -82,6 +83,15 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
             "stale_scans": int(getattr(bot_app, "_stale_marked", 0) or 0),   # اسکن‌های نیمه‌کارهٔ استارت
             "user_account": bool(getattr(bot_app.user, "ready", False)),
             "scan_running": bool(scan and not scan.get("done")),
+            # 🗄 DK-17: وضعیتِ پشتیبانِ گیتهاب (بی‌راز)
+            "gh_repo": str(getattr(bot_app, "_gh_repo", lambda: "")() or ""),
+            "gh_path": str(getattr(bot_app, "_gh_path", lambda: "")() or ""),
+            "gh_token": bool(getattr(bot_app, "_gh_token", lambda: "")()),
+            "gh_key": bool(getattr(bot_app, "_gh_key", lambda: "")()),
+            "gh_auto": bool(getattr(bot_app, "_gh_auto", lambda: True)()),
+            "gh_last_push": str(kv_gh.get("backup:gh:at", "") or ""),
+            "gh_last_summary": str(kv_gh.get("backup:gh:summary", "") or ""),
+            "gh_restored_channels": int(getattr(bot_app, "_gh_restored", 0) or 0),
             "hash_mode": str(getattr(bot_app.settings, "hash_mode", "") or ""),
             "hash_scope": str(getattr(bot_app.settings, "hash_scope", "") or ""),
             "hash_full_max_mb": int(getattr(bot_app.settings, "hash_full_max_mb", 0) or 0),
@@ -174,6 +184,8 @@ async def amain() -> int:
 
     # ⏹ DK-16: اسکن‌هایی که با ری‌استارت نیمه‌کاره مانده‌اند را علامت می‌زنیم و به مالک خبر می‌دهیم
     bot_task = asyncio.create_task(bot_app.mark_stale_scans())
+    # 🗄 DK-17: اگر دیتابیس خالی است (والیومِ تازه/اکانتِ تازه) از پشتیبانِ گیتهاب پر می‌شویم
+    gh_task = asyncio.create_task(bot_app.restore_from_github_if_empty())
     task = asyncio.create_task(bot_app.run())
     log.info("ربات شروع به کار کرد. Ctrl+C برای خروج.")
     try:
@@ -182,6 +194,7 @@ async def amain() -> int:
         pass
     log.info("خروج…")
     bot_task.cancel()
+    gh_task.cancel()
     task.cancel()
     try:
         await task

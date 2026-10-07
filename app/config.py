@@ -110,6 +110,12 @@ class Settings:
     # خالی = مقصدی تعیین نشده (بخشِ گروهِ چک خاموش است). می‌تواند `@username` یا `-100…` باشد.
     check_target: str = field(default_factory=lambda: _env("CHECK_TARGET"))
     check_albums: bool = field(default_factory=lambda: _env_bool("CHECK_ALBUMS", True))
+    # 🗄 DK-17: پشتیبانِ گیتهاب — «منبعِ یکتا» برای هش‌ها/کانال‌ها/تنظیمات روی همان مخزنِ سورس
+    gh_backup_repo: str = field(default_factory=lambda: _env("GH_BACKUP_REPO", "baddarksss/dupfinder"))
+    gh_backup_path: str = field(default_factory=lambda: _env("GH_BACKUP_PATH", "backup") or "backup")
+    gh_backup_token: str = field(default_factory=lambda: _env("GH_BACKUP_TOKEN") or _env("GH_TOKEN"))
+    backup_key: str = field(default_factory=lambda: _env("BACKUP_KEY"))     # رمزِ قفلِ فایلِ پشتیبان
+    gh_backup_auto: bool = field(default_factory=lambda: _env_bool("GH_BACKUP_AUTO", True))
     progress_interval: float = field(default_factory=lambda: _env_float("PROGRESS_INTERVAL", 2.0))
     scan_wait_time: float = field(default_factory=lambda: _env_float("SCAN_WAIT_TIME", 0.35))
     page_size: int = field(default_factory=lambda: _env_int("PAGE_SIZE", 8))
