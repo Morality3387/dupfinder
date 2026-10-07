@@ -18,8 +18,9 @@ from .tg_api import TgError, esc
 from .user_client import looks_like_phone, norm_digits, norm_phone
 from . import backup as B                     # 💾 DK-16: پشتیبانِ هش‌ها
 from . import gh_backup as G                  # 🗄 DK-17: پشتیبانِ گیتهاب
+from . import railway as RW                   # 🚂 DK-18: اعتبار/روزِ باقی‌ماندهٔ Railway
 
-APP_REV = "2026-10-07-dk17"                   # همان REVِ main.py (در فایلِ پشتیبان می‌آید)
+APP_REV = "2026-10-07-dk18"                   # همان REVِ main.py (در فایلِ پشتیبان می‌آید)
 
 log = logging.getLogger("dup.bot")
 
@@ -254,6 +255,14 @@ SETTING_INFO: Dict[str, Dict[str, Any]] = {
                     ("0", "خاموش", "رکوردها می‌مانند (گروه‌ها ممکن است فایلِ حذف‌شده نشان دهند)")],
         "tip": "این کار <b>هیچ‌وقت</b> چیزی را در تلگرام پاک نمی‌کند — فقط دیتابیسِ خودِ ربات تمیز می‌شود.",
     },
+    "notify_scan_done": {
+        "icon": "🔔", "title": "نوتیفِ پایانِ اسکن",
+        "what": "وقتی اسکن تمام شد (یا خطا خورد/کنسل شد)، ربات یک پیامِ جداگانه بفرستد تا "
+                "لازم نباشد مرتب چک کنید که تمام شده یا نه.",
+        "options": [("1", "روشن (پیش‌فرض)", "🔔 پیامِ کوتاه با شمارشِ گروه‌ها و مدتِ اسکن"),
+                    ("0", "خاموش", "فقط همان گزارشِ عادی (بی‌پیامِ اضافه)")],
+        "tip": "این نوتیف با «🔕 بی‌صدا» نمی‌آید؛ گوشی خبردار می‌شود.",
+    },
     "incr_tail": {
         "icon": "🔄", "title": "بازخوانیِ پیام‌های آخر",
         "what": "در «🔄 ادامهٔ اسکن» (فقط جدیدها)، چند پیامِ آخرِ کانال دوباره خوانده شود تا پستِ "
@@ -273,7 +282,7 @@ SETTING_GROUPS: List[Tuple[str, Tuple[str, ...]]] = [
     ("📏 حجم و زمان", ("size_tol_pct", "size_tol_min", "dur_tol_s", "min_duration_s",
                        "size_time_require_one_exact")),
     ("🧩 گروه‌بندی", ("cluster_mode",)),
-    ("📥 اسکن و ایندکس", ("media_kinds", "incr_tail", "prune_missing")),
+    ("📥 اسکن و ایندکس", ("media_kinds", "incr_tail", "prune_missing", "notify_scan_done")),
     ("📎 فوروارد به چتِ شما", ("max_forward_per_group",)),
     ("📤 گروهِ چک (ارسال با دکمه، بدونِ سقف)", ("check_target", "check_albums")),
 ]
@@ -352,6 +361,7 @@ class BotApp:
         self._scanner_factory = scanner_factory or (lambda **kw: Scanner(db, user, self.cfg_dict, **kw))
         self._stale_marked = 0        # 💾 DK-16: چند اسکنِ نیمه‌کاره در استارت «متوقف‌شده» شد
         self.gh_transport = None      # 🗄 DK-17: برای تستِ گفتگو با گیتهاب تزریق می‌شود
+        self.rw_transport = None      # 🚂 DK-18: برای تستِ گفتگو با Railway تزریق می‌شود
         self.bot_username = ""
         self.bot_id = 0
         self._qr_task: Optional[asyncio.Task] = None
@@ -818,6 +828,199 @@ class BotApp:
                         "groups": int(getattr(res, "groups", 0) or 0),
                         "files": int(getattr(res, "files", 0) or 0)})
         return out
+
+    # ═════════════════════════ 🚂 DK-18: حسابِ Railway ═════════════════════════
+
+    RW_TTL = 900          # هر ۱۵ دقیقه یک‌بار تازه می‌شود (ضدِ درخواستِ زیاد)
+
+    def _rw_token(self) -> str:
+        return str(self.db.kv_get("railway:token", "") or self.settings.railway_token or "").strip()
+
+    def _rw_project(self) -> str:
+        return str(self.db.kv_get("railway:project", "") or
+                   self.settings.railway_project_id or "").strip()
+
+    def _rw_client(self) -> RW.Railway:
+        return RW.Railway(self._rw_token(), project_id=self._rw_project(),
+                          transport=self.rw_transport)
+
+    def _rw_cached(self) -> Dict[str, Any]:
+        """آخرین اطلاعاتِ ذخیره‌شده (بدونِ درخواستِ شبکه‌ای) — برای صفحهٔ اصلی."""
+        try:
+            raw = self.db.kv_get("railway:info", "")
+            info = json.loads(raw) if raw else {}
+        except Exception:
+            info = {}
+        if not isinstance(info, dict):
+            info = {}
+        try:
+            info["age"] = int(time.time()) - int(info.get("fetched_at") or 0)
+        except Exception:
+            info["age"] = 0
+        err = str(self.db.kv_get("railway:err", "") or "")
+        if err:
+            info["error"] = err
+        return info
+
+    def _rw_line(self) -> str:
+        """یک خطِ خلاصه برای صفحهٔ اصلی: طرح · اعتبارِ مانده · مصرف · روزِ مانده."""
+        if not self._rw_token():
+            return "🚂 ریلوی: <i>توکن تنظیم نشده</i> — «🚂 ریلوی» را بزنید"
+        info = self._rw_cached()
+        if info.get("error") and not info.get("fetched_at"):
+            return "🚂 ریلوی: ⚠️ <i>خوانده نشد — «🚂 ریلوی» را بزنید</i>"
+        if not info.get("fetched_at"):
+            return "🚂 ریلوی: <i>برای دیدنِ اعتبار، 🔄 را بزنید</i>"
+        parts = []
+        if info.get("plan"):
+            parts.append("طرح <b>%s</b>" % esc(info["plan"]))
+        parts.append("اعتبارِ مانده: <b>$%.2f</b>" % float(info.get("credit") or 0))
+        if float(info.get("usage") or 0) > 0:
+            parts.append("مصرف: $%.2f" % float(info.get("usage") or 0))
+        if info.get("is_trial"):
+            parts.append("🎁 آزمایشی")
+        if info.get("days_left"):
+            parts.append("<b>%s روز</b> مانده" % R.fa_digits(int(info["days_left"])))
+        line = "🚂 ریلوی: " + " · ".join(parts)
+        warn = RW.warn_text(info)
+        if warn:
+            line += "\n   ⚠️ %s" % esc(warn)
+        return line
+
+    async def _rw_refresh(self, *, force: bool = False) -> Dict[str, Any]:
+        """گرفتنِ تازه از Railway (با کش) — خطا هرگز ربات را نمی‌اندازد."""
+        info = self._rw_cached()
+        if not force and info.get("fetched_at") and int(info.get("age") or 0) < self.RW_TTL:
+            return info
+        if not self._rw_token():
+            return {}
+        try:
+            fresh = await self._rw_client().fetch()
+        except RW.RailwayError as e:
+            log.info("اطلاعاتِ Railway گرفته نشد: %s", e)
+            self.db.kv_set("railway:err", str(e))
+            return dict(info or {}, error=str(e))
+        except Exception as e:
+            log.info("اطلاعاتِ Railway (خطای نامنتظر): %s", e)
+            self.db.kv_set("railway:err", str(e))
+            return dict(info or {}, error=str(e))
+        self.db.kv_set("railway:info", json.dumps(fresh, ensure_ascii=False))
+        self.db.kv_set("railway:err", "")
+        return fresh
+
+    async def rw_startup(self) -> None:
+        """در استارت یک‌بار (اگر توکن هست) اطلاعات را می‌گیرد تا صفحهٔ اصلی پر باشد."""
+        if self._rw_token():
+            await self._rw_refresh(force=True)
+
+    async def _rw_menu(self, chat: int, *, edit: Optional[int] = None, note: str = "") -> None:
+        """صفحهٔ «🚂 حسابِ Railway»: اعتبار/مصرف/روزها + تنظیمِ توکن و شناسهٔ پروژه."""
+        info = self._rw_cached()
+        lines: List[str] = []
+        if note:
+            lines += [note, ""]
+        lines += ["🚂 <b>حسابِ Railway</b>", "",
+                  "این بخش فقط <b>می‌خواند</b>: طرح، اعتبارِ باقی‌مانده، مصرفِ این دوره و "
+                  "چند روز تا پایانِ دوره/آزمایشی. برای این‌که قبل از اتمام، ربات را جابه‌جا کنید."]
+        if not self._rw_token():
+            lines += ["", "⚠️ <b>توکنِ Railway تنظیم نشده.</b>",
+                      "• در سرور (Variables) بگذارید: <code>RAILWAY_TOKEN=…</code>", 
+                      "• یا همین‌جا با دکمهٔ «🔐 توکن» بفرستید (پیامتان بعدش پاک می‌شود)."]
+        elif info.get("error"):
+            lines += ["", "❌ %s" % esc(str(info["error"]))]
+        elif info.get("fetched_at"):
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(info.get("fetched_at") or 0)))
+            lines += ["",
+                      "🏷 طرح: <b>%s</b>%s" % (esc(info.get("plan") or "—"),
+                                              " · 🎁 آزمایشی" if info.get("is_trial") else ""),
+                      "🗂 ورک‌اسپیس: %s" % esc(info.get("workspace") or "—"),
+                      "💳 اعتبارِ باقی‌مانده: <b>$%.2f</b>" % float(info.get("credit") or 0),
+                      "📉 مصرفِ این دوره: <b>$%.4f</b>" % float(info.get("usage") or 0),
+                      "⏳ روزِ باقی‌مانده: <b>%s</b>%s" % (R.fa_digits(int(info.get("days_left") or 0)),
+                                                          " (آزمایشی)" if info.get("is_trial") else ""),
+                      "🕒 آخرین بروزرسانی: %s" % esc(when)]
+            w = RW.warn_text(info)
+            if w:
+                lines += ["", "⚠️ <b>%s</b> — قبل از رسیدن به صفر، پشتیبانِ گیتهاب را چک کنید." % esc(w)]
+            if info.get("period_end"):
+                lines.append("📅 پایانِ دوره: %s" % esc(time.strftime(
+                    "%Y-%m-%d", time.localtime(int(info["period_end"])))))
+        else:
+            lines += ["", "<i>هنوز چیزی خوانده نشده — «🔄 بروزرسانی» را بزنید.</i>"]
+        rows: List[List[Dict[str, str]]] = [[R.btn("🔄 بروزرسانی", "rw:refresh")],
+                                            [R.btn("🔐 توکنِ Railway", "rw:tok"),
+                                             R.btn("🪪 شناسهٔ پروژه", "rw:pid")]]
+        if self._rw_token():
+            rows.append([R.btn("🗑 برداشتنِ توکن", "rw:clr"),
+                         R.btn("💾 پشتیبان‌ها", "bk:menu")])
+        else:
+            rows.append([R.btn("💾 پشتیبان‌ها", "bk:menu")])
+        rows.append([R.btn("⚙️ تنظیمات", "st:menu"), R.btn("🏠 منوی اصلی", "home")])
+        txt = "\n".join(lines)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+    async def _rw_ask_token(self, chat: int) -> None:
+        self.pending[chat] = {"kind": "railway_token"}
+        await self.api.send_message(chat, (
+            "🔐 <b>توکنِ Railway را بفرستید</b>\n\n"
+            "از Railway → Account → Tokens (یا همان توکنِ Projectی که برای دیپلوی دارید) بسازید و بفرستید.\n"
+            "• پیامتان بلافاصله از چت <b>حذف</b> می‌شود.\n"
+            "• بهتر است در سرور متغیر <code>RAILWAY_TOKEN</code> را ست کنید (پایدارتر است).\n"
+            "<i>برای برداشتنِ توکنِ ذخیره‌شده بنویسید: پاک</i>"),
+            kb=R.kb([[R.btn("🚂 ریلوی", "rw:menu")]]))
+
+    async def _rw_ask_project(self, chat: int) -> None:
+        self.pending[chat] = {"kind": "railway_project"}
+        await self.api.send_message(chat, (
+            "🪪 <b>شناسهٔ پروژه</b> (اختیاری)\n\n"
+            "اگر حساب چند پروژه دارد، شناسهٔ همین پروژه را بدهید تا آمار همان را نشان بدهم:\n"
+            "<code>%s</code>\n\n<i>بی‌شناسه هم کار می‌کند (اولین ورک‌اسپیسِ توکن).</i>"
+            % esc(self._rw_project() or "7c67892f-e44e-461a-9754-b000eb1f5408")),
+            kb=R.kb([[R.btn("🚂 ریلوی", "rw:menu")]]))
+
+    async def _rw_set_token(self, chat: int, text: str, m: Dict[str, Any]) -> None:
+        val = str(text or "").strip()
+        self.pending.pop(chat, None)
+        if val.lower() in ("پاک", "حذف", "clear", "delete", "remove", "-"):
+            self.db.kv_set("railway:token", "")
+            await self._rw_menu(chat, note="🗑 توکنِ ذخیره‌شده در ربات پاک شد.")
+            return
+        if len(val) < 12 or " " in val:
+            await self.api.send_message(chat, "⚠️ این شبیه توکن نیست. یک توکنِ کامل بفرستید "
+                                              "(مثلِ یک UUID یا رشتهٔ بلندِ بدونِ فاصله).")
+            return
+        self.db.kv_set("railway:token", val)
+        try:
+            await self.api.delete_message(int(chat), int((m or {}).get("message_id") or 0))
+        except Exception:
+            pass
+        info = await self._rw_refresh(force=True)
+        note = "✅ توکن ثبت شد و پیامتان پاک شد."
+        if info.get("error"):
+            note += "\n❌ ولی خواندنِ حساب نشد: %s" % esc(str(info["error"]))
+        elif info.get("fetched_at"):
+            note += "\n💳 اعتبار: <b>$%.2f</b> · ⏳ %s روز مانده" % (
+                float(info.get("credit") or 0), R.fa_digits(int(info.get("days_left") or 0)))
+        await self._rw_menu(chat, note=note)
+
+    async def _rw_set_project(self, chat: int, text: str) -> None:
+        val = str(text or "").strip()
+        self.pending.pop(chat, None)
+        if val.lower() in ("پاک", "حذف", "clear", "-"):
+            self.db.kv_set("railway:project", "")
+            await self._rw_menu(chat, note="🗑 شناسهٔ پروژه پاک شد (اولین ورک‌اسپیسِ توکن نشان داده می‌شود).")
+            return
+        self.db.kv_set("railway:project", val)
+        await self._rw_refresh(force=True)
+        await self._rw_menu(chat, note="✅ شناسهٔ پروژه ثبت شد و اطلاعات از نو خوانده شد.")
+
+    async def _rw_clear(self, chat: int, *, edit: Optional[int] = None) -> None:
+        self.db.kv_set("railway:token", "")
+        self.db.kv_set("railway:info", "")
+        await self._rw_menu(chat, edit=edit, note="🗑 توکنِ ربات پاک شد (اگر در متغیرهای سرور ست باشد، آن می‌مانَد).")
 
     # ═════════════════════════ 🗄 DK-17: پشتیبانِ گیتهاب ═════════════════════════
 
@@ -1480,6 +1683,12 @@ class BotApp:
             if p["kind"] == "check_target":                 # 📤 مقصدِ «گروهِ چک» با تایپ
                 await self._apply_setting(chat, "check_target", text)
                 return
+            if p["kind"] == "railway_token":               # 🚂 توکنِ Railway
+                await self._rw_set_token(chat, text, m)
+                return
+            if p["kind"] == "railway_project":             # 🪪 شناسهٔ پروژه
+                await self._rw_set_project(chat, text)
+                return
             if p["kind"] == "backup_key":                  # 🔑 رمزِ قفلِ پشتیبان
                 await self._gh_set_key(chat, text)
                 return
@@ -1591,15 +1800,18 @@ class BotApp:
                 "📡 کانال‌ها: <b>%s</b> · 🎬 فایل‌ها: <b>%s</b>\n"
                 "🔁 گروه‌های تکراریِ یافته‌شده: <b>%s</b>\n"
                 "🔑 حسابِ کاربری (برای تاریخچهٔ کامل): %s\n"
+                "%s\n"
                 "⚙️ وضعیت: %s\n\n"
                 "<i>ربات فقط می‌خواند و فوروارد می‌کند — هیچ‌چیزی پاک نمی‌شود.</i>") % (
-            st["channels"], "{:,}".format(st["files"]), "{:,}".format(st["groups"]), acc, scanning)
+            st["channels"], "{:,}".format(st["files"]), "{:,}".format(st["groups"]), acc,
+            self._rw_line(), scanning)
         rows = [[R.btn("📡 کانال‌های من", "ch:list"), R.btn("➕ افزودنِ کانال", "ch:add")],
                 [R.btn("🔑 اتصالِ حسابِ کاربری", "acc:menu"), R.btn("⚙️ تنظیمات", "st:menu")]]
         if self.owner_id and int(uid) == int(self.owner_id):
             rows.append([R.btn("👥 ادمین‌های ربات (%d)" % len(self.admin_ids), "own:menu")])
         rows.append([R.btn("📤 گروهِ چک (فرستادنِ تکراری‌ها برای بازبینی)", "ck:menu")])
         rows.append([R.btn("💾 پشتیبانِ هش‌ها (نسخه‌گیری و بازگرداندن)", "bk:menu")])
+        rows.append([R.btn("🚂 ریلوی (اعتبار و روزهای مانده)", "rw:menu")])
         rows.append([R.btn("❓ راهنما", "help")])
         if self.scan and not self.scan.get("done"):
             rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
@@ -2961,6 +3173,10 @@ class BotApp:
             "name": self.db.count_groups(res.scan_id, signal="name"),
             "caption": self.db.count_groups(res.scan_id, signal="caption"),
         }
+        try:
+            await self._notify_scan_done(res, c, counts)
+        except Exception as _e:
+            log.info("نوتیفِ پایانِ اسکن: %s", _e)
         head = {"done": "✅ اسکن تمام شد", "canceled": "⏹ اسکن کنسل شد", "error": "⚠️ خطا در اسکن"}.get(res.status, res.status)
         self._store_notes(scan, getattr(res, "notes", None))
         scan = self.db.get_scan(res.scan_id) or scan      # 🩹 یادداشت‌های تازه هم در همین گزارش بیایند
@@ -2983,6 +3199,50 @@ class BotApp:
             await self.api.send_chat_action(chat, "typing")
         if self.scan and self.scan.get("task") and not self.scan["task"].done():
             pass
+
+    async def _notify_scan_done(self, res: ScanResult, c: Dict[str, Any],
+                                counts: Dict[str, Any]) -> None:
+        """🔔 DK-18: پیامِ جداگانهٔ پایانِ اسکن (تا کاربر مرتب چک نکند «تمام شد یا نه»).
+
+        چرا پیامِ جدا: گزارشِ نهایی فقط پیامِ پیشرفت را **ویرایش** می‌کند و ویرایش، نوتیفِ
+        تازه نمی‌سازد؛ پس گوشی خبردار نمی‌شد. این پیام تازه فرستاده می‌شود (بی‌صدا نه).
+        """
+        if not bool(getattr(self.settings, "notify_scan_done", True)):
+            return
+        cid = int((c or {}).get("id") or 0)
+        sc = self.scan or {}
+        started = float(sc.get("started") or 0)
+        dur = max(0, int(time.time() - started)) if started else 0
+        if dur >= 3600:
+            dur_txt = "%s ساعت و %s دقیقه" % (R.fa_digits(dur // 3600), R.fa_digits((dur % 3600) // 60))
+        elif dur >= 60:
+            dur_txt = "%s دقیقه" % R.fa_digits(dur // 60)
+        else:
+            dur_txt = "%s ثانیه" % R.fa_digits(dur)
+        icon = {"done": "🔔 <b>اسکن تمام شد</b>", "canceled": "⏹ <b>اسکن کنسل شد</b>",
+                "error": "⚠️ <b>اسکن با خطا ایستاد</b>"}.get(str(res.status), "🔔 <b>اسکن تمام شد</b>")
+        lines = [icon, "📡 <b>%s</b>" % esc(R.channel_title(c or {})),
+                 "⏱ مدت: <b>%s</b>" % dur_txt,
+                 "🎬 فایل‌های اسکن: <b>%s</b>" % "{:,}".format(int(res.files or 0))]
+        if str(res.status) == "done":
+            lines.append("🔁 گروه‌های تکراری: <b>%s</b>" % "{:,}".format(int(res.groups or 0)))
+            exact = int(counts.get("exact") or 0)
+            if exact:
+                lines.append("⭐⭐⭐⭐ تأییدِ قطعی: <b>%s</b>" % "{:,}".format(exact))
+        rows = []
+        if int(res.groups or 0) > 0:
+            rows.append([R.btn("🔁 دیدنِ گروه‌ها", "l:%d:%d:all:0" % (res.scan_id, res.channel_id))])
+        rows.append([R.btn("🔄 ادامهٔ اسکن (فقط جدیدها)", "scan:cont:%d" % cid),
+                     R.btn("🏠 منوی اصلی", "home")])
+        targets: List[int] = []
+        for t in (int(sc.get("chat_id") or 0), int(self.owner_id or 0)):
+            if t and t not in targets:
+                targets.append(t)
+        for t in targets:
+            try:
+                await self.api.send_message(t, "\n".join(lines), kb=R.kb(rows))
+            except Exception as e:
+                log.info("نوتیفِ پایانِ اسکن به %s نرسید: %s", t, e)
 
     async def _cancel_scan(self, chat: int) -> None:
         if not self.scan or self.scan.get("done"):
@@ -3938,6 +4198,20 @@ class BotApp:
                     await self._set_check_target(chat, "", "")
             elif op == "cs":
                 await self._check_send_all(chat, int(parts[1]), int(parts[2]), edit=mid)
+            elif op == "rw":
+                sub = parts[1] if len(parts) > 1 else "menu"
+                if sub == "menu":
+                    await self._rw_menu(chat, edit=mid)
+                elif sub == "refresh":
+                    info = await self._rw_refresh(force=True)
+                    note = "" if not info.get("error") else "❌ " + esc(str(info["error"]))
+                    await self._rw_menu(chat, edit=mid, note=note)
+                elif sub == "tok":
+                    await self._rw_ask_token(chat)
+                elif sub == "pid":
+                    await self._rw_ask_project(chat)
+                elif sub == "clr":
+                    await self._rw_clear(chat, edit=mid)
             elif op == "bk":
                 sub = parts[1] if len(parts) > 1 else "menu"
                 if sub == "menu":

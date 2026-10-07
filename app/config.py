@@ -116,6 +116,11 @@ class Settings:
     gh_backup_token: str = field(default_factory=lambda: _env("GH_BACKUP_TOKEN") or _env("GH_TOKEN"))
     backup_key: str = field(default_factory=lambda: _env("BACKUP_KEY"))     # رمزِ قفلِ فایلِ پشتیبان
     gh_backup_auto: bool = field(default_factory=lambda: _env_bool("GH_BACKUP_AUTO", True))
+    # 🚂 DK-18: نمایشِ اعتبار/روزِ باقی‌ماندهٔ Railway در صفحهٔ اصلی
+    railway_token: str = field(default_factory=lambda: _env("RAILWAY_TOKEN"))
+    railway_project_id: str = field(default_factory=lambda: _env("RAILWAY_PROJECT_ID"))
+    # 🔔 DK-18: نوتیفِ پایانِ اسکن (پیامِ جداگانه تا گوشی خبردار شود)
+    notify_scan_done: bool = field(default_factory=lambda: _env_bool("NOTIFY_SCAN_DONE", True))
     progress_interval: float = field(default_factory=lambda: _env_float("PROGRESS_INTERVAL", 2.0))
     scan_wait_time: float = field(default_factory=lambda: _env_float("SCAN_WAIT_TIME", 0.35))
     page_size: int = field(default_factory=lambda: _env_int("PAGE_SIZE", 8))

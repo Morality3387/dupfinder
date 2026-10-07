@@ -24,7 +24,7 @@ from app.user_client import UserClient  # noqa: E402
 
 log = logging.getLogger("dup")
 _STARTED_AT = time.time()          # برای uptime_s در /health (قبلاً اشتباهاً از ساعتِ monotonic خوانده می‌شد)
-REV = "2026-10-07-dk17"             # برچسبِ نسخه (در /health دیده می‌شود)
+REV = "2026-10-07-dk18"             # برچسبِ نسخه (در /health دیده می‌شود)
 
 
 def uptime_seconds() -> int:
@@ -65,6 +65,7 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
     async def handle(_req):
         st = db.stats()
         kv_gh = db.kv_all()
+        rw = bot_app._rw_cached()
         scan = bot_app.scan or {}
         body = {
             "ok": True,
@@ -92,6 +93,12 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
             "gh_last_push": str(kv_gh.get("backup:gh:at", "") or ""),
             "gh_last_summary": str(kv_gh.get("backup:gh:summary", "") or ""),
             "gh_restored_channels": int(getattr(bot_app, "_gh_restored", 0) or 0),
+            # 🚂 DK-18: خلاصهٔ حسابِ Railway (بی‌راز)
+            "railway_token": bool(bot_app._rw_token()),
+            "railway_plan": str(rw.get("plan") or ""),
+            "railway_days_left": int(rw.get("days_left") or 0),
+            "railway_credit": float(rw.get("credit") or 0),
+            "railway_error": str(rw.get("error") or "")[:120],
             "hash_mode": str(getattr(bot_app.settings, "hash_mode", "") or ""),
             "hash_scope": str(getattr(bot_app.settings, "hash_scope", "") or ""),
             "hash_full_max_mb": int(getattr(bot_app.settings, "hash_full_max_mb", 0) or 0),
@@ -188,6 +195,8 @@ async def amain() -> int:
     gh_task = asyncio.create_task(bot_app.restore_from_github_if_empty())
     # 🚀 و اگر تا حالا نسخه‌ای روی گیتهاب نرفته، همین استارت یکی می‌فرستد (ساختِ پوشهٔ backup/)
     gh_task2 = asyncio.create_task(bot_app.gh_startup_push())
+    # 🚂 DK-18: یک‌بار اطلاعاتِ حسابِ Railway خوانده می‌شود تا صفحهٔ اصلی پر باشد
+    rw_task = asyncio.create_task(bot_app.rw_startup())
     task = asyncio.create_task(bot_app.run())
     log.info("ربات شروع به کار کرد. Ctrl+C برای خروج.")
     try:
@@ -198,6 +207,7 @@ async def amain() -> int:
     bot_task.cancel()
     gh_task.cancel()
     gh_task2.cancel()
+    rw_task.cancel()
     task.cancel()
     try:
         await task
