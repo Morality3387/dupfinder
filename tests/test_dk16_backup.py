@@ -257,3 +257,43 @@ def test_health_snapshot_exposes_scan_details():
         assert e.db.count_hashed_scope("full") > 0 and e.db.count_hashed_scope("sample") == 0
         assert e.db.stats()["hashed"] == e.db.count_hashed_scope()
         assert getattr(e.bot, "_stale_marked", 0) == 0     # اسکنِ سالم ⇒ چیزی علامت نمی‌خورد
+
+
+def test_health_endpoint_reports_scan_and_hash_details():
+    """③ خودِ `/health`: همان کلیدهایی که برای عیب‌یابی از بیرون لازم است."""
+    import socket
+    from app.bot_app import BotApp                    # noqa: E402
+    from app.db import Db                             # noqa: E402
+    from app.user_client import UserClient            # noqa: E402
+    import main as M                                  # noqa: E402
+    from dev.fake_telegram import FakeApi, FakeUser   # noqa: E402
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = int(s.getsockname()[1])
+    s.close()
+
+    async def go():
+        with tempfile.TemporaryDirectory() as d:
+            db = Db(str(Path(d) / "h.db"))
+            settings = Settings(bot_token="t", owner_id=OWNER, db_path=str(Path(d) / "x.db"),
+                                hash_scope="full", hash_mode="all")
+            bot = BotApp(FakeApi(), db, settings, UserClient(0, "", ""))
+            runner = await M.health_server(db, bot, port)
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as cl:
+                    async with cl.get("http://127.0.0.1:%d/health" % port) as r:
+                        assert r.status == 200
+                        return await r.json()
+            finally:
+                await runner.cleanup()
+                db.close()
+
+    body = asyncio.new_event_loop().run_until_complete(go())
+    for k in ("ok", "rev", "files", "hashed", "hash_full", "hash_sample", "hash_mode", "hash_scope",
+              "hash_full_max_mb", "stale_scans", "scan_running", "scan_state"):
+        assert k in body, "کلیدِ «%s» در /health نیست: %s" % (k, sorted(body))
+    assert body["rev"] == "2026-10-07-dk16"
+    assert body["hash_mode"] == "all" and body["hash_scope"] == "full"
+    assert body["scan_state"] == "idle" and body["stale_scans"] == 0
