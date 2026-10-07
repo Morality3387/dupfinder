@@ -33,6 +33,10 @@ class FakeApi:
         self.member_status: Dict[Tuple[int, int], str] = {}
         # 🚫 DK-15: چت‌هایی که ربات در آن‌ها «دسترسی ندارد» (برای تستِ هشدارِ قطعِ ارسال)
         self.blocked: set = set()
+        # 💾 DK-16: فایل‌های پشتیبانِ «ساخته‌شده» و «آپلودشده» (file_id ⇒ بایت‌ها)
+        self.docs: Dict[str, bytes] = {}
+        self.media_edits: List[Dict[str, Any]] = []
+        self.webhook: str = ""
 
     # ── ابزار ──
     def _log(self, method: str, **params: Any) -> None:
@@ -57,6 +61,10 @@ class FakeApi:
             if str(b) == str(rid):
                 return True
         return False
+
+    def next_mid(self) -> int:
+        """شناسهٔ پیامِ بعدی که این fake برمی‌گردانَد (برای آماده‌سازیِ پاسخِ سرور)."""
+        return int(self._mid) + 1
 
     def messages_with(self, text: str) -> List[Dict[str, Any]]:
         return [m for m in self.sent if text in str(m.get("text") or "")]
@@ -118,7 +126,13 @@ class FakeApi:
             raise TgError("forwardMessage", 400, "CHAT_FORWARDS_RESTRICTED")
         self.forwards.append({"to": int(to_chat), "from": int(from_chat), "msg_id": int(message_id)})
         self._mid += 1
-        return {"message_id": self._mid}
+        payload: Dict[str, Any] = {"message_id": self._mid}
+        # 💾 DK-16: اگر «محتوای کپی‌شده» را از قبل ثبت کرده‌اند، همان را هم می‌دهیم
+        if str(self._mid) in getattr(self, "docs", {}):
+            payload["document"] = {"file_id": str(self._mid), "file_name": "copy.json.gz"}
+            self.updates.append({"message": {"message_id": self._mid, "chat": {"id": to_chat},
+                                            "document": payload["document"]}})
+        return payload
 
     async def send_media_group(self, to_chat: int, from_chat: int, message_ids: List[int]) -> List[Dict[str, Any]]:
         """📎 ارسالِ آلبومی (DK-15): همان پیام‌ها یک‌جا ⇒ فایل دوباره آپلود نمی‌شود."""
@@ -178,7 +192,65 @@ class FakeApi:
         return True
 
     async def get_file(self, file_id: str) -> Dict[str, Any]:
+        # 💾 DK-16: `file_path` لازم است تا ربات بتواند فایلِ پشتیبان را دانلود کند
+        if str(file_id) in getattr(self, "docs", {}):
+            return {"file_id": str(file_id), "file_path": str(file_id), "file_size": len(self.docs[str(file_id)])}
         return {"file_id": file_id}
+
+    # ── 💾 DK-16: فایلِ پشتیبان ──
+    def backup_message(self, data: bytes, *, name: str = "dupfinder-hashes_test_1.json.gz",
+                       mid: int = 4242, caption: str = "") -> Dict[str, Any]:
+        """پیامی می‌سازد که یک فایلِ پشتیبان دارد (برای تستِ «کاربر فایل را فرستاد»)."""
+        self.docs[str(mid)] = bytes(data)
+        return {"message_id": int(mid), "chat": {"id": 0}, "from": {"id": 0}, "caption": caption,
+                "document": {"file_id": str(mid), "file_name": name,
+                             "mime_type": "application/gzip", "file_size": len(data)}}
+
+    async def send_document(self, to_chat: int, filename: str, data: bytes, *,
+                            caption: str = "") -> Dict[str, Any]:
+        if self._is_blocked(to_chat):
+            raise TgError("sendDocument", 403, "CHAT_WRITE_FORBIDDEN")
+        to_chat = self._resolve(to_chat)
+        self._mid += 1
+        mid = self._mid
+        self.docs[str(mid)] = bytes(data)
+        rec = {"message_id": mid, "chat_id": int(to_chat), "document": {"file_id": str(mid),
+               "file_name": str(filename), "file_size": len(data)}, "caption": caption,
+               "text": caption}
+        self.sent.append(rec)
+        self._log("sendDocument", chat_id=to_chat, filename=filename, size=len(data))
+        return rec
+
+    async def edit_message_media(self, chat_id: int, message_id: int, filename: str, data: bytes, *,
+                                 caption: str = "") -> Any:
+        chat_id = self._resolve(chat_id)
+        self._mid += 1
+        mid = self._mid
+        self.docs[str(mid)] = bytes(data)
+        self.media_edits.append({"chat_id": int(chat_id), "message_id": int(message_id),
+                                 "filename": str(filename), "size": len(data), "new_file_id": str(mid)})
+        self._log("editMessageMedia", chat_id=chat_id, message_id=message_id, filename=filename)
+        return {"message_id": int(message_id), "document": {"file_id": str(mid)}}
+
+    async def download_file(self, file_path: str, *, max_bytes: int = 20 * 1024 * 1024) -> bytes:
+        fid = str(file_path)
+        if fid not in self.docs:
+            raise TgError("getFile", 400, "file not found")
+        data = self.docs[fid]
+        if max_bytes and len(data) > int(max_bytes):
+            raise TgError("download", 413, "too big")
+        self._log("download", file_id=fid, size=len(data))
+        return data
+
+    async def set_webhook(self, url: str) -> Any:
+        self.webhook = str(url)
+        self._log("setWebhook", url=url)
+        return True
+
+    async def delete_webhook(self, drop_pending: bool = True) -> Any:
+        self.webhook = ""
+        self._log("deleteWebhook", drop_pending_updates=drop_pending)
+        return True
 
     async def close(self) -> None:
         return None

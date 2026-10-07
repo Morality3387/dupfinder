@@ -363,6 +363,28 @@ class Db:
         self._exec("UPDATE files SET content_hash=?, hash_scope=? WHERE id=?", (content_hash, scope, file_id))
         self.conn.commit()
 
+    def stale_running_scans(self) -> List[Dict[str, Any]]:
+        """💾 DK-16: اسکن‌هایی که در دیتابیس «در جریان» مانده‌اند (نشانهٔ ری‌استارتِ سرور).
+
+        چرا لازم است: اگر کانتینر وسطِ اسکن ری‌استارت شود، آن ردیف تا ابد `running` می‌مانَد و
+        کاربر فکر می‌کند اسکنش هنوز کار می‌کند. ربات در استارت‌آپ این‌ها را «متوقف‌شده» می‌کند.
+        """
+        return [dict(r) for r in self._all("SELECT * FROM scans WHERE status='running' ORDER BY id")]
+
+    def count_hashed_scope(self, scope: str = "") -> int:
+        """چند فایل با هشِ «کامل» یا «نمونه‌ای» داریم (برای /health)."""
+        want = str(scope or "").strip().lower()
+        if want == "full":
+            sql = "SELECT COUNT(*) c FROM files WHERE content_hash<>'' AND lower(hash_scope)='full'"
+        elif want:
+            sql = "SELECT COUNT(*) c FROM files WHERE content_hash<>'' AND lower(hash_scope)<>'full'"
+        else:
+            sql = "SELECT COUNT(*) c FROM files WHERE content_hash<>''"
+        try:
+            return int((self._one(sql) or {"c": 0})["c"] or 0)
+        except Exception:
+            return 0
+
     def files_of_channel(self, channel_id: int, limit: int = 0) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM files WHERE channel_id=? ORDER BY msg_id"
         if limit:

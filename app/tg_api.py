@@ -191,3 +191,61 @@ class TgApi:
 
     async def get_file(self, file_id: str) -> Dict[str, Any]:
         return await self.call("getFile", file_id=file_id)
+
+    # ── 💾 DK-16: فایلِ پشتیبان (multipart) ──
+    async def _multipart(self, method: str, form: Any, *, throttle_chat: Optional[int] = None) -> Any:
+        """ارسالِ multipart (برای `sendDocument`/`editMessageMedia`)."""
+        url = "%s/bot%s/%s" % (API, self.token, method)
+        if throttle_chat is not None:
+            await self._throttle(throttle_chat)
+        s = await self.session()
+        async with s.post(url, data=form) as r:
+            data = await r.json(content_type=None)
+        if isinstance(data, dict) and data.get("ok"):
+            return data.get("result")
+        code = int((data or {}).get("error_code") or r.status or 0)
+        desc = str((data or {}).get("description") or "")
+        raise TgError(method, code, desc)
+
+    async def send_document(self, to_chat: int, filename: str, data: bytes, *,
+                            caption: str = "") -> Dict[str, Any]:
+        """💾 ارسالِ فایلِ پشتیبان به چت (تا در تلگرامِ خودتان محفوظ بماند)."""
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(int(to_chat)))
+        if caption:
+            form.add_field("caption", str(caption)[:1000])
+            form.add_field("parse_mode", "HTML")
+        form.add_field("document", bytes(data), filename=str(filename),
+                       content_type="application/gzip")
+        return await self._multipart("sendDocument", form, throttle_chat=to_chat)
+
+    async def edit_message_media(self, chat_id: int, message_id: int, filename: str, data: bytes, *,
+                                 caption: str = "") -> Any:
+        """💾 پشتیبانِ تازه، جای همان پیامِ قبلی را می‌گیرد (تا چت پر از فایل نشود)."""
+        media = {"type": "document", "media": "attach://doc",
+                 "caption": str(caption)[:1000], "parse_mode": "HTML"}
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(int(chat_id)))
+        form.add_field("message_id", str(int(message_id)))
+        form.add_field("media", json.dumps(media, ensure_ascii=False))
+        form.add_field("doc", bytes(data), filename=str(filename),
+                       content_type="application/gzip")
+        return await self._multipart("editMessageMedia", form, throttle_chat=chat_id)
+
+    async def download_file(self, file_path: str, *, max_bytes: int = 20 * 1024 * 1024) -> bytes:
+        """دانلودِ فایلِ ارسالی از تلگرام (برای بازگرداندنِ پشتیبان)."""
+        url = "%s/file/bot%s/%s" % (API, self.token, file_path)
+        s = await self.session()
+        async with s.get(url) as r:
+            if r.status != 200:
+                raise TgError("download", r.status, "دانلودِ فایلِ پشتیبان ناموفق بود")
+            data = await r.read()
+        if max_bytes and len(data) > int(max_bytes):
+            raise TgError("download", 413, "فایلِ پشتیبان بزرگ‌تر از حدِ انتظار است")
+        return data
+
+    async def set_webhook(self, url: str) -> Any:
+        return await self.call("setWebhook", url=url)
+
+    async def delete_webhook(self, drop_pending: bool = True) -> Any:
+        return await self.call("deleteWebhook", drop_pending_updates=drop_pending)

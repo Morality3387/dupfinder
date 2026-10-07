@@ -24,7 +24,7 @@ from app.user_client import UserClient  # noqa: E402
 
 log = logging.getLogger("dup")
 _STARTED_AT = time.time()          # برای uptime_s در /health (قبلاً اشتباهاً از ساعتِ monotonic خوانده می‌شد)
-REV = "2026-10-07-dk15"             # برچسبِ نسخه (در /health دیده می‌شود)
+REV = "2026-10-07-dk16"             # برچسبِ نسخه (در /health دیده می‌شود)
 
 
 def uptime_seconds() -> int:
@@ -76,8 +76,17 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
             "files": st["files"],
             "scans": st["scans"],
             "groups": st["groups"],
+            "hashed": int(st.get("hashed") or 0),                 # 💾 DK-16: هش‌ها
+            "hash_full": db.count_hashed_scope("full"),
+            "hash_sample": db.count_hashed_scope("sample"),
+            "stale_scans": int(getattr(bot_app, "_stale_marked", 0) or 0),   # اسکن‌های نیمه‌کارهٔ استارت
             "user_account": bool(getattr(bot_app.user, "ready", False)),
             "scan_running": bool(scan and not scan.get("done")),
+            "hash_mode": str(getattr(bot_app.settings, "hash_mode", "") or ""),
+            "hash_scope": str(getattr(bot_app.settings, "hash_scope", "") or ""),
+            "hash_full_max_mb": int(getattr(bot_app.settings, "hash_full_max_mb", 0) or 0),
+            **{("scan_" + k): v for k, v in (bot_app.scan_snapshot() or {}).items()
+               if k in ("state", "phase", "pct", "hashed", "hash_total", "note", "channel", "age_s")},
         }
         return web.json_response(body)
 
@@ -130,6 +139,15 @@ async def amain() -> int:
         ok = await user.start()
         log.info("حسابِ کاربری: %s", "وصل ✅" if ok else "وصل نشد — با دکمهٔ 🔑 از ربات وارد شوید")
 
+    # 💾 DK-16: در حالتِ polling با `getUpdates`، وبهوکِ قدیمی جلوی دریافتِ آپدیت‌ها را می‌گیرد
+    # (باگِ واقعیِ گزارش‌شده در سرویسِ خواهر). در حالتِ dev/testing دست نمی‌زنیم.
+    if not settings.keep_webhook:
+        try:
+            await api.delete_webhook(drop_pending=False)
+            log.info("وبهوک (اگر بود) برداشته شد؛ ربات با getUpdates کار می‌کند.")
+        except Exception as e:
+            log.info("برداشتنِ وبهوک ناموفق (بی‌خطر): %s", e)
+
     bot_app = BotApp(api, db, settings, user)
     runner = None
     port = int(os.environ.get("PORT") or 0)
@@ -154,6 +172,8 @@ async def amain() -> int:
     except Exception:
         pass
 
+    # ⏹ DK-16: اسکن‌هایی که با ری‌استارت نیمه‌کاره مانده‌اند را علامت می‌زنیم و به مالک خبر می‌دهیم
+    bot_task = asyncio.create_task(bot_app.mark_stale_scans())
     task = asyncio.create_task(bot_app.run())
     log.info("ربات شروع به کار کرد. Ctrl+C برای خروج.")
     try:
@@ -161,6 +181,7 @@ async def amain() -> int:
     except KeyboardInterrupt:
         pass
     log.info("خروج…")
+    bot_task.cancel()
     task.cancel()
     try:
         await task

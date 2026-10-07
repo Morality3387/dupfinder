@@ -97,6 +97,9 @@ class Settings:
     cluster_mode: str = field(default_factory=lambda: (_env("CLUSTER_MODE", "loose") or "loose").lower())
     # در اسکنِ کامل، رکوردِ فایل‌هایی که کاربر در تلگرام پاک کرده از ایندکسِ ربات حذف شود
     prune_missing: bool = field(default_factory=lambda: _env_bool("PRUNE_MISSING", True))
+    keep_webhook: bool = field(default_factory=lambda: _env_bool("KEEP_WEBHOOK", False))
+    # ↑ 💾 DK-16: پیشفرض، وبهوکِ احتمالیِ قدیمی برداشته میشود تا `getUpdates` کار کند؛
+    #   اگر روی این سرور وبهوک لازم دارید، KEEP_WEBHOOK=1 بگذارید.
     # ── اسکنِ محدود (بدونِ حسابِ کاربری، از پیش‌نمایشِ عمومیِ t.me/s) ──
     preview_pages: int = field(default_factory=lambda: _env_int("PREVIEW_PAGES", 6))
     owner_claim_code: str = field(default_factory=lambda: _env("OWNER_CLAIM_CODE"))

@@ -30,7 +30,7 @@ TOKENS = "/home/user/tokens.env"
 INCLUDE = [
     ".env.example", ".gitignore", "Dockerfile", "README.fa.md", "README.md", "main.py",
     "pytest.ini", "railway.json", "requirements.txt",
-    "app/__init__.py", "app/bot_app.py", "app/config.py", "app/db.py", "app/matching.py",
+    "app/__init__.py", "app/backup.py", "app/bot_app.py", "app/config.py", "app/db.py", "app/matching.py",
     "app/preview.py", "app/report.py", "app/scanner.py", "app/similarity.py", "app/tg_api.py",
     "app/user_client.py",
     "dev/__init__.py", "dev/fake_telegram.py", "dev/mock_e2e.py",

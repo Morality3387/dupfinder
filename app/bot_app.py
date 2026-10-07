@@ -15,6 +15,9 @@ from .config import LABELS, Settings
 from .scanner import Progress, ScanResult, Scanner
 from .tg_api import TgError, esc
 from .user_client import looks_like_phone, norm_digits, norm_phone
+from . import backup as B                     # 💾 DK-16: پشتیبانِ هش‌ها
+
+APP_REV = "2026-10-07-dk16"                   # همان REVِ main.py (در فایلِ پشتیبان می‌آید)
 
 log = logging.getLogger("dup.bot")
 
@@ -345,6 +348,7 @@ class BotApp:
         # سقفِ فایل در هر نوبتِ «📤 فورواردِ همهٔ تکراری‌ها» (بقیه با دکمهٔ ادامه می‌آید)
         self.forward_all_budget = int(getattr(settings, "forward_all_budget", 40) or 40)
         self._scanner_factory = scanner_factory or (lambda **kw: Scanner(db, user, self.cfg_dict, **kw))
+        self._stale_marked = 0        # 💾 DK-16: چند اسکنِ نیمه‌کاره در استارت «متوقف‌شده» شد
         self.bot_username = ""
         self.bot_id = 0
         self._qr_task: Optional[asyncio.Task] = None
@@ -633,6 +637,413 @@ class BotApp:
         elif "channel_post" in u:
             pass  # پستِ کانال‌ها نادیده (فقط به‌عنوانِ منبعِ اسکن مهم‌اند)
 
+    # ═════════════════════════ 💾 DK-16: پشتیبانِ هش‌ها ═════════════════════════
+    MAX_BACKUP_MB = 45          # سقفِ خواندنِ فایلِ پشتیبانِ ورودی (بزرگ‌ترش را تلگرام می‌دهد، ولی محتاطیم)
+
+    def _backup_auto(self) -> bool:
+        """پشتیبانِ خودکارِ پایانِ اسکن روشن است؟ (پیش‌فرض: روشن)"""
+        return str(self.db.kv_get("backup:auto", "1") or "1").strip().lower() not in ("0", "off", "خاموش", "")
+
+    def _backup_chat(self, default: int = 0) -> int:
+        """چتِ مقصدِ پشتیبان — پیش‌فرض: همان چتی که دکمه زده شد (یا مالک)."""
+        v = str(self.db.kv_get("backup:chat", "") or "").strip()
+        if v.lstrip("-").isdigit():
+            return int(v)
+        return int(default or self.owner_id or 0)
+
+    def _backup_stamp(self, cid: int) -> str:
+        return str(self.db.kv_get("backup:at:%d" % int(cid), "") or "")
+
+    def _hashed_now(self, cid: int) -> int:
+        """چند ردیفِ همین کانال هش دارند (ملاکِ «بکاپِ لازم است»)."""
+        try:
+            r = self.db._all("SELECT COUNT(*) c FROM files WHERE channel_id=? AND content_hash<>''",
+                             (int(cid),)) or []
+            return int((r[0]["c"] if r else 0) or 0)
+        except Exception:
+            return 0
+
+    def _backup_pending(self, cid: int) -> int:
+        """چند هش از آخرین پشتیبانِ همین کانال تازه شده."""
+        try:
+            base = int(self.db.kv_get("backup:hashes:%d" % int(cid), 0) or 0)
+        except Exception:
+            base = 0
+        return max(0, self._hashed_now(int(cid)) - base)
+
+    def _backup_need(self) -> List[Tuple[Dict[str, Any], int, str]]:
+        """کانال‌هایی که از آخرین پشتیبانشان هشِ تازه گرفته‌اند (برای هشدارِ صفحه)."""
+        out: List[Tuple[Dict[str, Any], int, str]] = []
+        for c in self.db.list_channels():
+            n = self._backup_pending(int(c["id"]))
+            if n > 0:
+                out.append((c, n, self._backup_stamp(int(c["id"]))))
+        return out
+
+    @staticmethod
+    def _is_backup_doc(m: Dict[str, Any]) -> bool:
+        """فایلِ ورودی، پشتیبانِ ماست؟ (بر اساسِ نامِ فایل)"""
+        name = str(((m or {}).get("document") or {}).get("file_name") or "").lower()
+        return bool(name.endswith(".json.gz") or name.endswith(".json") or
+                    ("dupfinder" in name and ".gz" in name))
+
+    async def _bk_send(self, dest: int, data: bytes, name: str, cid: int, *, rep: Dict[str, Any],
+                       edit_prev: bool = False) -> int:
+        """فایلِ پشتیبان را به چتِ مقصد می‌فرستد (یا جای پیامِ قبلی می‌نشاند)."""
+        title = str((self.db.get_channel(int(cid)) or {}).get("title") or "کانال")
+        cap = ("💾 <b>پشتیبانِ ایندکس و هش‌های «%s»</b>\n"
+               "%s فایل · %s هش · حجمِ فایل: %s\n"
+               "<i>این فایل را نگه دارید؛ روی هر اکانتی با «♻️ بازگرداندن» همه‌چیز برمی‌گردد.</i>"
+               % (esc(title), "{:,}".format(int(rep.get("count") or 0)),
+                  "{:,}".format(int(rep.get("hashed") or 0)), B.human_bytes(len(data))))
+        mid_prev = int(self.db.kv_get("backup:msg:%d" % int(cid), 0) or 0)
+        if edit_prev and mid_prev:
+            try:
+                await self.api.edit_message_media(int(dest), mid_prev, name, data, caption=cap)
+                self.db.kv_set("backup:hashes:%d" % int(cid), self._hashed_now(int(cid)))
+                self.db.kv_set("backup:at:%d" % int(cid), time.strftime("%Y-%m-%d %H:%M"))
+                return mid_prev
+            except TgError:
+                pass                      # جای قبلی نشد ⇒ پیامِ تازه می‌فرستیم
+        res = await self.api.send_document(int(dest), name, data, caption=cap)
+        mid_new = int((res or {}).get("message_id") or 0)
+        if mid_new:
+            self.db.kv_set("backup:msg:%d" % int(cid), mid_new)
+        self.db.kv_set("backup:hashes:%d" % int(cid), self._hashed_now(int(cid)))
+        self.db.kv_set("backup:at:%d" % int(cid), time.strftime("%Y-%m-%d %H:%M"))
+        return mid_new
+
+    async def _backup_scan_done(self, cid: int) -> None:
+        """① پایانِ هر اسکن: اگر هشِ تازه‌ای ساخته شد، بی‌سروصدا پشتیبان می‌فرستد.
+
+        چرا: کاربر گفت «بعداً باید ربات را روی اکانتِ جدید ببرم و نمی‌خواهم از صفر اسکن کند».
+        پس هر بار که هشِ تازه ساخته می‌شود، همان لحظه یک نسخه در تلگرامِ خودش محفوظ می‌مانَد.
+        """
+        if not int(cid) or not self._backup_auto():
+            return
+        if self._backup_pending(int(cid)) <= 0:
+            return
+        dest = self._backup_chat()
+        if not dest:
+            return
+        data, rep, name = B.export_channel(self.db, int(cid), rev=APP_REV)
+        if int(rep.get("count") or 0) <= 0:
+            return
+        await self._bk_send(dest, data, name, int(cid), rep=rep, edit_prev=True)
+        log.info("💾 پشتیبانِ خودکارِ کانال %s فرستاده شد (%s فایل)", cid, rep.get("count"))
+
+    async def mark_stale_scans(self) -> int:
+        """⏹ DK-16: اسکن‌هایی که با ری‌استارتِ سرور نیمه‌کاره مانده‌اند را «متوقف‌شده» می‌کند.
+
+        خواستهٔ کاربر: «دو ساعت گذشته و اسکن تمام نشده — عادی است؟» واقعیت این بود که
+        دیپلوی، کانتینر را ری‌استارت کرده بود و اسکن مرده بود، ولی هیچ‌جا گفته نمی‌شد و ردیفِ
+        `running` در دیتابیس می‌مانْد. حالا در استارت: علامت می‌خورد و به مالک اطلاع می‌رسد.
+        """
+        n = 0
+        now = int(time.time())
+        try:
+            stale = self.db.stale_running_scans()
+        except Exception as e:
+            log.info("خواندنِ اسکن‌های نیمه‌کاره: %s", e)
+            return 0
+        for sc in stale:
+            sid, cid = int(sc.get("id") or 0), int(sc.get("channel_id") or 0)
+            try:
+                self.db.update_scan(sid, status="canceled", phase="canceled", finished_at=now)
+                self.db.kv_set("scan:interrupted:%d" % cid,
+                               json.dumps({"scan_id": sid, "at": now}, ensure_ascii=False))
+            except Exception as e:
+                log.info("علامت‌زدنِ اسکنِ %s: %s", sid, e)
+                continue
+            n += 1
+            if not self.owner_id:
+                continue
+            c = self.db.get_channel(cid) or {}
+            where = str(c.get("title") or c.get("tg_id") or cid)
+            try:
+                await self.api.send_message(
+                    int(self.owner_id),
+                    "⏹ <b>اسکنِ قبلی قطع شد</b>\n\n"
+                    "اسکنِ «%s» (شمارهٔ %d) با <b>ری‌استارتِ سرور</b> نیمه‌کاره ماند و متوقف شد.\n"
+                    "هیچ چیز پاک نشده و هش‌های حساب‌شده سرِ جایشان‌اند.\n\n"
+                    "<i>برای ادامه، «🔄 ادامهٔ اسکن (فقط جدیدها)» را بزنید: فایل‌هایی که هش دارند "
+                    "دیگر دانلود نمی‌شوند و فقط بقیه ادامه پیدا می‌کند.</i>" % (esc(where), sid),
+                    kb=R.kb([[R.btn("🔄 ادامهٔ اسکن (فقط جدیدها)", "scan:cont:%d" % cid)],
+                             [R.btn("🏠 منوی اصلی", "home")]]))
+            except Exception as e:
+                log.info("اطلاعِ اسکنِ قطع‌شده به مالک: %s", e)
+        self._stale_marked = n
+        if n:
+            log.info("⏹ %d اسکنِ نیمه‌کاره «متوقف‌شده» علامت خورد.", n)
+        return n
+
+    def scan_snapshot(self) -> Dict[str, Any]:
+        """وضعیتِ اسکن برای /health — فاز، درصد، «هش‌شده از کل» و یادداشت."""
+        sc = self.scan or {}
+        if not sc:
+            return {"state": "idle"}
+        out: Dict[str, Any] = {"state": "running" if not sc.get("done") else "finished",
+                               "channel": str((sc.get("channel") or {}).get("title") or ""),
+                               "cid": int(sc.get("cid") or 0),
+                               "started_at": int(sc.get("started") or 0),
+                               "age_s": int(time.time() - float(sc.get("started") or time.time()))}
+        pr = getattr(sc.get("scanner"), "progress", None)
+        if pr is not None:
+            out.update({"phase": str(getattr(pr, "phase", "") or ""),
+                        "pct": round(float(getattr(pr, "pct", 0.0) or 0.0), 1),
+                        "hashed": int(getattr(pr, "hashed", 0) or 0),
+                        "hash_total": int(getattr(pr, "hash_total", 0) or 0),
+                        "note": str(getattr(pr, "note", "") or "")[:120]})
+        res = sc.get("result")
+        if res is not None:
+            out.update({"status": str(getattr(res, "status", "") or ""),
+                        "groups": int(getattr(res, "groups", 0) or 0),
+                        "files": int(getattr(res, "files", 0) or 0)})
+        return out
+
+    async def _bk_menu(self, chat: int, *, edit: Optional[int] = None, note: str = "") -> None:
+        """صفحهٔ «💾 پشتیبانِ هش‌ها» — فرستادنِ نسخه و بازگرداندن."""
+        st = self.db.stats()
+        pend = self._backup_need()
+        lines: List[str] = []
+        if note:
+            lines += [note, ""]
+        lines += ["💾 <b>پشتیبانِ هش‌ها (و بازگرداندن)</b>", "",
+                  "اینجا «ایندکس + هش»های هر کانال در یک فایلِ فشرده نگه داشته می‌شود. "
+                  "اگر ربات را روی <b>اکانتِ تازه</b> بردید، همان فایل را به رباتِ نو بدهید تا "
+                  "<b>هش‌ها را از صفر نسازد</b> (هشِ کاملِ هزاران فایل = چند ساعت دانلود).",
+                  "",
+                  "🗂 ایندکس‌شده: <b>%s</b> فایل · هش‌شده: <b>%s</b>"
+                  % ("{:,}".format(st["files"]), "{:,}".format(st["hashed"])),
+                  "📤 چتِ پشتیبان: %s" % ("<b>همین چت</b>" if not self.db.kv_get("backup:chat", "") else
+                                           "شناسهٔ <code>%s</code>" % self._backup_chat()),
+                  "🔄 خودکار پس از هر اسکن (اگر هشِ تازه باشد): %s"
+                  % ("<b>روشن ✅</b>" if self._backup_auto() else "<b>خاموش ⛔</b>")]
+        if pend:
+            lines += ["", "⚠️ از آخرین پشتیبانِ این‌ها هشِ تازه اضافه شده — یک‌بار «📤» را بزنید:",
+                      *["• <b>%s</b> — %d هشِ تازه" % (esc(c.get("title") or c.get("tg_id")), n)
+                        for c, n, _st in pend]]
+        else:
+            lines += ["", "✅ همه‌چیز در آخرین پشتیبان‌ها ثبت شده است."]
+        rows: List[List[Dict[str, str]]] = [[R.btn("📤 پشتیبانِ همه (یک فایل)", "bk:all")]]
+        for c in self.db.list_channels():
+            cid = int(c["id"])
+            n = self._backup_pending(cid)
+            label = "%s%s" % ("(%d هشِ تازه) " % n if n else "",
+                              str(c.get("title") or "کانال")[:24])
+            rows.append([R.btn("📤 " + label, "bk:one:%d" % cid)])
+        rows.append([R.btn("♻️ بازگرداندن از فایلِ پشتیبان", "bk:restore")])
+        if str(self.db.kv_get("backup:chat", "") or "").strip() != str(int(chat)):
+            rows.append([R.btn("📥 پشتیبان‌ها در همین چت نگه داشته شوند", "bk:chat")])
+        rows.append([R.btn("🔄 خودکار: %s" % ("روشن ✅" if self._backup_auto() else "خاموش ⛔"), "bk:auto")])
+        rows.append([R.btn("⚙️ تنظیمات", "st:menu"), R.btn("🏠 منوی اصلی", "home")])
+        txt = "\n".join(lines)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+    async def _bk_restore_help(self, chat: int) -> None:
+        """راهنمای بازگرداندن (وقتی فایلی همراهِ درخواست نیست)."""
+        await self.api.send_message(
+            chat,
+            "♻️ <b>بازگرداندنِ هش‌ها</b>\n\n"
+            "۱) فایلِ پشتیبان (<code>dupfinder-hashes_….json.gz</code> یا "
+            "<code>dupfinder-backup_….json.gz</code>) را <b>برای همین ربات بفرستید</b> "
+            "(یا از پیامِ قدیمیِ پشتیبان، آن را <b>فوروارد</b> کنید).\n"
+            "۲) ربات اول خلاصهٔ فایل را نشان می‌دهد و بعد از «✅ بازگردان» همهٔ هش‌ها می‌نشیند.\n\n"
+            "<i>کانال باید اول با «➕ افزودنِ کانال» به رباتِ تازه معرفی شده باشد؛ "
+            "کانال با شناسه/یوزرنیمش پیدا می‌شود.</i>",
+            kb=R.kb([[R.btn("💾 پشتیبان‌ها", "bk:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+
+    async def _bk_fetch(self, m: Dict[str, Any]) -> bytes:
+        """خواندنِ فایلِ پشتیبان — اگر فوروارد بود (فایلش در دسترسِ ربات نیست)،
+        یک کپی در چتِ خودمان می‌گیریم و همان را می‌خوانیم."""
+        d = (m or {}).get("document") or {}
+        mid = int((m or {}).get("message_id") or 0)
+        data = await self._bk_try_download(str(d.get("file_id") or ""))
+        if data:
+            return data
+        if not mid:
+            return b""
+        # پیامِ فورواردشده (یا فایلِ ناقابلِ دانلود): یک کپی در چتِ خودمان می‌گیریم و همان را می‌خوانیم
+        try:
+            res = await self.api.forward_message(self.owner_id or 0,
+                                                 int((m.get("chat") or {}).get("id") or 0), mid)
+            new_mid = int((res or {}).get("message_id") or 0)
+            if new_mid:
+                found = await self._bk_wait_document(new_mid)
+                data = await self._bk_try_download(str((found or {}).get("file_id") or ""))
+                if data:
+                    return data
+        except TgError as e:
+            log.info("کپی‌گرفتن از فایلِ پشتیبان ناموفق: %s", e)
+        return b""
+
+    async def _bk_try_download(self, file_id: str) -> bytes:
+        """دانلودِ فایل با `file_id` (اگر تلگرام اجازه بدهد) — وگرنه بایتِ خالی."""
+        if not file_id:
+            return b""
+        try:
+            info = await self.api.get_file(file_id)
+            path = str((info or {}).get("file_path") or "")
+            if not path:
+                raise TgError("getFile", 400, "مسیرِ فایل برنگشت")
+            return await self.api.download_file(path, max_bytes=self.MAX_BACKUP_MB * 1024 * 1024)
+        except TgError as e:
+            log.info("دانلودِ فایلِ پشتیبان (%s): %s", file_id, e)
+            return b""
+
+    async def _bk_wait_document(self, mid: int, tries: int = 6) -> Dict[str, Any]:
+        """کمی صبر می‌کند تا فایلِ کپی‌شده در آپدیت‌های بعدی برسد."""
+        for i in range(max(1, int(tries))):
+            for u in list(self.api.updates or []):
+                msg = (u or {}).get("message") or {}
+                if int(msg.get("message_id") or 0) == int(mid) and msg.get("document"):
+                    return dict(msg["document"] or {})
+            await asyncio.sleep(0.4 if self.settings.progress_interval <= 0 else 1.0)
+        return {}
+
+    async def _bk_preview(self, chat: int, m: Dict[str, Any]) -> bool:
+        """پیش‌نمایشِ بازگرداندن: فایلِ فرستاده‌شده را می‌خواند و خلاصه‌اش را نشان می‌دهد."""
+        name = str(((m or {}).get("document") or {}).get("file_name") or "")
+        if not self._is_backup_doc(m):
+            await self.api.send_message(
+                chat, "📄 فایلِ «%s» را دیدم، ولی این فایلِ پشتیبانِ ربات نیست. "
+                      "نامِ پشتیبان‌ها با <code>dupfinder-</code> شروع می‌شود." % esc(name))
+            return False
+        data = await self._bk_fetch(m)
+        if not data:
+            await self.api.send_message(chat, "⚠️ نتوانستم این فایل را بخوانم. یک‌بارِ دیگر بفرستید "
+                                              "(یا از پیامِ پشتیبان <b>فوروارد</b> کنید).")
+            return False
+        try:
+            payload = B.load(data)
+        except Exception as e:
+            await self.api.send_message(chat, "⚠️ %s" % esc(str(e)))
+            return False
+        prev = self.pending.get(chat) or {}
+        self.pending[chat] = {"kind": "backup_restore", "data": data,
+                              "cid": int(prev.get("cid") or 0) if prev.get("kind") == "backup_restore" else 0}
+        st = B.stats_of(payload)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(st.get("exported_at") or 0))) if st.get("exported_at") else "—"
+        lines = ["💾 <b>فایلِ پشتیبان شناخته شد</b>", "",
+                 "🗂 دامنه: %s" % ("<b>همهٔ کانال‌ها</b>" if st["scope"] == "snapshot" else "یک کانال"),
+                 "📛 %s" % esc(st.get("title") or "—"),
+                 "🔑 شناسه: <code>%s</code>" % (st.get("tg_id") or "—"),
+                 "📄 %s فایل · 🔑 %s هش%s" % ("{:,}".format(st["files"]), "{:,}".format(st["hashed"]),
+                                              " · ⚙️ %s کلیدِ تنظیمات" % st["settings"] if st.get("settings") else ""),
+                 "🕒 ساخته‌شده: %s · حجم: %s" % (when, B.human_bytes(len(data))), ""]
+        if st["scope"] == "snapshot":
+            plan = B.import_plan(self.db, payload)
+            pv = B.import_preview(plan)
+            lines.append("روی این ربات: <b>%d</b> کانال پیدا شد" % pv["channels"])
+            if pv["missing"]:
+                lines.append("⚠️ این کانال‌ها هنوز به ربات اضافه نشده‌اند: %s"
+                             % esc(", ".join(str(x.get("title") or x.get("tg_id")) for x in pv["missing"])))
+            lines.append("پیش‌بینی: %s ردیفِ تازه · %s هش نوشته می‌شود"
+                         % ("{:,}".format(pv["new"]), "{:,}".format(pv["fills"])))
+        else:
+            plan = B.import_plan(self.db, payload, fallback_channel_id=0)
+            pv = B.import_preview(plan)
+            lines.append("روی این ربات: %s" % ("<b>کانال پیدا شد ✅</b>" if pv["channels"] else
+                                              "<b>کانال پیدا نشد ⚠️</b> (اول با «➕ افزودنِ کانال» اضافه‌اش کنید)"))
+            lines.append("پیش‌بینی: %s ردیفِ تازه · %s هش نوشته می‌شود"
+                         % ("{:,}".format(pv["new"]), "{:,}".format(pv["fills"])))
+        lines += ["", "<i>هیچ فایل و گروهی پاک نمی‌شود؛ فقط ایندکس و هش‌ها نوشته می‌شوند.</i>"]
+        rows: List[List[Dict[str, str]]] = [[R.btn("✅ بازگردان (هش‌ها)", "bk:yes")]]
+        if st.get("settings"):
+            rows.append([R.btn("♻️ هش‌ها + تنظیمات", "bk:yes:settings")])
+        rows.append([R.btn("❌ انصراف", "bk:no")])
+        await self.api.send_message(chat, "\n".join(lines), kb=R.kb(rows))
+        return True
+
+    async def _bk_do_restore(self, chat: int, *, with_settings: bool = False,
+                             edit: Optional[int] = None) -> None:
+        """اجرای بازگرداندنِ فایلِ آماده (بعد از تأییدِ کاربر)."""
+        p = self.pending.get(chat) or {}
+        data = p.get("data") or b""
+        cid_after = int(p.get("cid") or 0)
+        if p.get("kind") != "backup_restore" or not data:
+            await self._bk_menu(chat, edit=edit, note="⚠️ فایلی برای بازگرداندن نیست. اول فایلِ پشتیبان را بفرستید.")
+            return
+        try:
+            payload = B.load(data)
+        except Exception as e:
+            await self.pending.pop(chat, None) if False else None
+            await self._bk_menu(chat, edit=edit, note="⚠️ %s" % esc(str(e)))
+            return
+        plan = B.import_plan(self.db, payload)
+        stat = B.apply_import(self.db, plan, with_settings=bool(with_settings))
+        self.pending.pop(chat, None)
+        title = str((payload.get("channel") or {}).get("title") or "")
+        note = ("✅ <b>بازگرداندن تمام شد</b>\n"
+                "🗂 کانال: <b>%s</b>\n"
+                "📄 ردیف‌های نوشته‌شده: <b>%s</b> · 🔑 هش‌های برگشته: <b>%s</b>%s%s"
+                % (esc(title or "همهٔ کانال‌ها"), "{:,}".format(stat["rows"]),
+                   "{:,}".format(stat["hashes"]),
+                   " · ⚙️ تنظیمات: <b>%d</b> کلید" % stat["settings"] if stat.get("settings") else "",
+                   " · ⚠️ %d کانال پیدا نشد" % stat["missing"] if stat.get("missing") else ""))
+        note += "\n\n<i>حالا «🔄 ادامهٔ اسکن (فقط جدیدها)» بزنید: هشِ فایل‌های برگشته دیگر دانلود نمی‌شود.</i>"
+        await self._bk_menu(chat, edit=edit, note=note)
+        if cid_after:
+            await self._start_scan(chat, int(cid_after), full=True)
+
+    async def _bk_auto_toggle(self, chat: int, *, edit: Optional[int] = None) -> None:
+        """روشن/خاموش‌کردنِ پشتیبانِ خودکارِ پایانِ اسکن."""
+        now = self._backup_auto()
+        self.db.kv_set("backup:auto", "0" if now else "1")
+        await self._bk_menu(chat, edit=edit, note=("🔄 پشتیبانِ خودکار <b>خاموش</b> شد." if now else
+                                                   "🔄 پشتیبانِ خودکار <b>روشن</b> شد (پس از هر اسکنی که هشِ تازه بسازد)."))
+
+    async def _bk_one(self, chat: int, cid: int) -> None:
+        """پشتیبانِ یک کانال (از دکمهٔ همان کانال)."""
+        c = self.db.get_channel(int(cid)) or {}
+        data, rep, name = B.export_channel(self.db, int(cid), rev=APP_REV)
+        if int(rep.get("count") or 0) <= 0:
+            await self._bk_menu(chat, note="⚠️ «%s» هنوز فایلی در ایندکس ندارد؛ اول یک اسکن بزنید."
+                                 % esc(c.get("title") or ""))
+            return
+        dest = self._backup_chat(chat)
+        await self._bk_send(dest, data, name, int(cid), rep=rep, edit_prev=True)
+        await self._bk_menu(chat, note="✅ پشتیبانِ «%s» فرستاده شد — %s فایل · %s هش · %s"
+                             % (esc(c.get("title") or ""), "{:,}".format(rep["count"]),
+                                "{:,}".format(rep["hashed"]), B.human_bytes(rep["bytes"])))
+
+    async def _bk_all(self, chat: int) -> None:
+        """پشتیبانِ همهٔ کانال‌ها + تنظیمات در یک فایل (برای جابه‌جاییِ کاملِ اکانت)."""
+        data, rep, name = B.export_snapshot(self.db, rev=APP_REV)
+        dest = self._backup_chat(chat)
+        cap = ("💾 <b>پشتیبانِ کاملِ آی‌دی‌فایندر</b>\n"
+               "%d کانال · %s فایل · %s هش · حجم: %s\n"
+               "<i>همین یک فایل برای انتقالِ کاملِ ربات به اکانتِ تازه کافی است (تنظیمات هم داخلش است؛ "
+               "رمزها نه).</i>" % (rep["channels"], "{:,}".format(rep["files"]),
+                                   "{:,}".format(rep["hashed"]), B.human_bytes(rep["bytes"])))
+        await self.api.send_document(dest, name, data, caption=cap)
+        await self._bk_menu(chat, note="✅ پشتیبانِ کامل فرستاده شد — %d کانال · %s فایل · %s"
+                             % (rep["channels"], "{:,}".format(rep["files"]), B.human_bytes(rep["bytes"])))
+
+    async def _bk_cancel_pending(self, chat: int, cid: int) -> bool:
+        """اگر فایلِ پشتیبانِ آمادهٔ بازگرداندن دارید، اول آن را یادآوری می‌کند.
+
+        این دقیقاً همان گامِ کاربر است: روی اکانتِ تازه اول پشتیبان را برگردان، بعد اسکن بزن.
+        """
+        p = self.pending.get(chat) or {}
+        if p.get("kind") != "backup_restore":
+            return False
+        p["cid"] = int(cid)
+        self.pending[chat] = p
+        await self.api.send_message(
+            chat,
+            "💾 یک <b>فایلِ پشتیبان</b> آمادهٔ بازگرداندن دارید.\n"
+            "اگر اول آن را برگردانیم، هش‌های کانال می‌نشیند و این اسکن <b>سریع</b> می‌شود.\n\n"
+            "• «✅ بازگردان و بعد اسکن» ⇒ همان کار.\n"
+            "• «❌ انصراف و اسکنِ معمولی» ⇒ پشتیبان کنار گذاشته می‌شود.\n"
+            "<i>مقصدِ فایل هم پس از بازگرداندن فراموش نمی‌شود.</i>",
+            kb=R.kb([[R.btn("✅ بازگردان و بعد اسکن", "bk:yes")],
+                     [R.btn("❌ انصراف و اسکنِ معمولی", "bk:no")]]))
+        return True
+
     async def handle_message(self, m: Dict[str, Any]) -> None:
         chat = int(m.get("chat", {}).get("id", 0))
         uid = int(m.get("from", {}).get("id", chat) or chat)
@@ -656,6 +1067,9 @@ class BotApp:
                 await self.api.send_message(chat, "❌ لطفاً شمارهٔ <b>خودتان</b> را با دکمهٔ «📱 ارسالِ شمارهٔ من» بفرستید.")
                 return
             await self._login_phone_got(chat, str(contact["phone_number"]), m)
+            return
+        # 💾 فایلِ پشتیبان (فرستاده‌شده یا فورواردشده) ⇒ خلاصه + دکمهٔ بازگرداندن
+        if (m.get("document") and self._is_backup_doc(m)) and await self._bk_preview(chat, m):
             return
         # 📤 حالتِ انتظارِ «تعیینِ مقصدِ گروهِ چک با فوروارد»: خودِ پیامِ فورواردشده آدرس را می‌دهد
         p_ck = self.pending.get(chat)
@@ -748,6 +1162,8 @@ class BotApp:
             await self.api.send_message(chat, "\n".join(lines))
         elif cmd in ("check", "checkgroup", "mirror"):
             await self._check_menu(chat)
+        elif cmd in ("backup", "hashes", "بکاپ", "پشتیبان"):
+            await self._bk_menu(chat)
         elif cmd in ("settings", "st", "config"):
             if _squash(arg).startswith("guide") or "راهنما" in arg or "توضیح" in arg:
                 await self._settings_guide(chat)
@@ -800,6 +1216,7 @@ class BotApp:
         if self.owner_id and int(uid) == int(self.owner_id):
             rows.append([R.btn("👥 ادمین‌های ربات (%d)" % len(self.admin_ids), "own:menu")])
         rows.append([R.btn("📤 گروهِ چک (فرستادنِ تکراری‌ها برای بازبینی)", "ck:menu")])
+        rows.append([R.btn("💾 پشتیبانِ هش‌ها (نسخه‌گیری و بازگرداندن)", "bk:menu")])
         rows.append([R.btn("❓ راهنما", "help")])
         if self.scan and not self.scan.get("done"):
             rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
@@ -2147,6 +2564,11 @@ class BotApp:
     async def _finish_scan(self, res: ScanResult, c: Dict[str, Any]) -> None:
         sc = self.scan or {}
         self.scan = dict(sc, done=True, result=res)
+        # 💾 DK-16: اگر این اسکن هشِ تازه ساخته باشد، بی‌سروصدا نسخه‌ای در چتِ کاربر می‌نشیند
+        try:
+            await self._backup_scan_done(int((c or {}).get("id") or 0))
+        except Exception as _e:
+            log.info("پشتیبانِ خودکارِ پایانِ اسکن: %s", _e)
         chat = int(sc.get("chat_id") or 0)
         scan = self.db.get_scan(res.scan_id) or {}
         counts = {
@@ -3064,6 +3486,8 @@ class BotApp:
                     await self._cancel_scan(chat)
                 elif sub == "all":
                     await self._start_scan_for_all(chat)
+                elif sub in ("full", "cont") and await self._bk_cancel_pending(chat, int(parts[2])):
+                    pass                                  # 💾 کاربر گفته: اول پشتیبان را برگردان
                 elif sub == "full":
                     await self._start_scan(chat, int(parts[2]), full=True)
                 elif sub == "cont":
@@ -3131,6 +3555,28 @@ class BotApp:
                     await self._set_check_target(chat, "", "")
             elif op == "cs":
                 await self._check_send_all(chat, int(parts[1]), int(parts[2]), edit=mid)
+            elif op == "bk":
+                sub = parts[1] if len(parts) > 1 else "menu"
+                if sub == "menu":
+                    await self._bk_menu(chat, edit=mid)
+                elif sub == "one":
+                    await self._bk_one(chat, int(parts[2]))
+                elif sub == "all":
+                    await self._bk_all(chat)
+                elif sub == "restore":
+                    await self._bk_restore_help(chat)
+                elif sub == "chat":
+                    self.db.kv_set("backup:chat", str(int(chat)))
+                    await self._bk_menu(chat, edit=mid,
+                                        note="✅ از این به بعد فایل‌های پشتیبان در <b>همین چت</b> نگه داشته می‌شوند.")
+                elif sub == "auto":
+                    await self._bk_auto_toggle(chat, edit=mid)
+                elif sub == "yes":
+                    await self._bk_do_restore(chat, with_settings=(len(parts) > 2 and parts[2] == "settings"),
+                                              edit=mid)
+                elif sub == "no":
+                    self.pending.pop(chat, None)
+                    await self._bk_menu(chat, edit=mid, note="❌ بازگرداندن کنار گذاشته شد.")
             elif op == "csrf":
                 scan_id, cid, gid = int(parts[1]), int(parts[2]), int(parts[3])
                 await self._check_send_all(chat, scan_id, cid, only=[gid], again=True)
