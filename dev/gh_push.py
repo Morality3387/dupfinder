@@ -27,18 +27,29 @@ BRANCH = "main"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # /home/user/dupfinder
 TOKENS = "/home/user/tokens.env"
 
-# فایل‌هایی که پوش می‌شوند (همان‌هایی که مخزن دارد + تست‌های تازه)
-INCLUDE = [
-    ".env.example", ".gitignore", "Dockerfile", "README.fa.md", "README.md", "main.py",
-    "pytest.ini", "railway.json", "requirements.txt",
-    "app/__init__.py", "app/backup.py", "app/gh_backup.py", "app/bot_app.py", "app/config.py",
-    "app/db.py", "app/matching.py",
-    "app/preview.py", "app/report.py", "app/scanner.py", "app/similarity.py", "app/tg_api.py",
-    "app/user_client.py",
-    "dev/__init__.py", "dev/fake_telegram.py", "dev/mock_e2e.py",
-    "dev/gh_push.py", "dev/railway_deploy.py", "dev/run_tests.sh",
-] + ["tests/" + n for n in sorted(os.listdir(os.path.join(ROOT, "tests")))
-     if n.endswith(".py")]
+# فایل‌هایی که پوش می‌شوند — **خودکار** از پوشه‌ها ساخته می‌شود تا هیچ فایلی جا نیفتد
+# (درسِ گرفته‌شده: با فهرستِ دستی، `app/railway.py` در پوش جا افتاد).
+TOP_FILES = [".env.example", ".gitignore", "Dockerfile", "README.fa.md", "README.md", "main.py",
+             "pytest.ini", "railway.json", "requirements.txt"]
+SCAN_DIRS = ["app", "dev", "tests"]
+
+
+def _collect() -> list:
+    out = list(TOP_FILES)
+    for d in SCAN_DIRS:
+        base = os.path.join(ROOT, d)
+        if not os.path.isdir(base):
+            continue
+        for name in sorted(os.listdir(base)):
+            if not name.endswith(".py") or name.startswith("_"):
+                continue
+            out.append("%s/%s" % (d, name))
+    return out
+
+
+INCLUDE = _collect()
+# ⚠️ پوشهٔ `backup/` عمداً در این فهرست نیست: آن را خودِ ربات روی گیتهاب می‌نویسد
+#    (فایلِ قفل‌شدهٔ پشتیبان + manifest) و پوشِ سورس نباید دستش بزند.
 
 
 def token() -> str:
