@@ -1,0 +1,18 @@
+{
+ "format": "dupfinder-gh-backup",
+ "version": 1,
+ "rev": "2026-10-07-dk18",
+ "exported_at": 1791390930,
+ "encrypted": true,
+ "crypto": "PBKDF2-SHA256/200k + AES-256-CBC + HMAC-SHA256",
+ "channels": 2,
+ "files": 3282,
+ "hashed": 1432,
+ "settings": 6,
+ "bytes": 250133,
+ "sha256": "74d091f1acf85f8dead8bc19d85c8ffee2bad443a65835e59f58c7d193d8ea94",
+ "unique_key": [
+  "channel_id",
+  "msg_id"
+ ]
+}
