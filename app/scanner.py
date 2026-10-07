@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 from . import matching as M
 from . import similarity as S
+from .user_client import HASH_ITEM_TIMEOUT, HashCanceled
 
 log = logging.getLogger("dup.scan")
 
@@ -273,7 +274,7 @@ class Scanner:
                 if ids:
                     self.progress.note = "هش‌گذاریِ نامزدها (دانلودِ جزئی)…"
                     await self._emit(force=True)
-                    await self._hash_ids(cfg, tg_id, files, ids)
+                    await self._hash_ids(cfg, tg_id, files, ids, stats=hstats)
                     files = _with_norms(self.db.files_of_channel(cid))
                     res.hashed = self.progress.hashed
                     if getattr(self, "hash_upgraded", 0):
@@ -284,6 +285,12 @@ class Scanner:
                         res.notes.append(
                             "ℹ️ %s فایل بزرگ‌تر از سقفِ «hash_full_max_mb» است ⇒ با هشِ نمونه‌ای ماند؛ "
                             "برای هشِ کاملِ آن‌ها سقف را بالا ببرید." % self.hash_stuck_sample)
+                    if hstats.get("timeouts"):
+                        res.notes.append(
+                            "⏱ %s فایل در دانلود گیر کرد (بیش از %d دقیقه) و رد شد تا اسکن قفل نشود؛ "
+                            "در اسکنِ بعدی خودکار دوباره هش می‌شوند."
+                            % (int(hstats["timeouts"]),
+                               max(1, int(float(cfg.get("hash_item_timeout") or HASH_ITEM_TIMEOUT) // 60))))
             self._check()
 
             # ── فازِ ۳: گروه‌بندیِ نهایی ──
@@ -401,7 +408,7 @@ class Scanner:
         return total, last
 
     async def _hash_ids(self, cfg: Dict[str, Any], tg_id: int, files: Sequence[Dict[str, Any]],
-                        ids: Sequence[int]) -> None:
+                        ids: Sequence[int], *, stats: Optional[Dict[str, int]] = None) -> None:
         by_id = {int(f["id"]): f for f in files}
         todo: List[Tuple[int, int]] = []      # (msg_id, size)
         # باگِ گزارش‌شده: قبلاً فقط «بودنِ content_hash» بررسی می‌شد، پس عوض‌کردنِ
@@ -436,7 +443,16 @@ class Scanner:
                 out = await self.user.hash_batch(
                     tg_id, chunk,
                     scope=str(cfg.get("hash_scope") or "sample"),
-                    full_max_bytes=int(cfg.get("hash_full_max_mb") or 0) * 1024 * 1024)
+                    full_max_bytes=int(cfg.get("hash_full_max_mb") or 0) * 1024 * 1024,
+                    # ⏹ لغوِ فوری: داخلِ خودِ دانلودها هم چک می‌شود (نه فقط بینِ دسته‌ها)
+                    cancel=lambda: self.canceled,
+                    item_timeout=float(cfg.get("hash_item_timeout") or HASH_ITEM_TIMEOUT),
+                    stats=stats)
+            except HashCanceled:
+                # کاربر «⏹ توقف» زده ⇒ همان مسیرِ کنسلِ اسکن (ثبت در دیتابیس + گزارش)
+                self._cancel.set()
+                self._check()
+                out = {}
             except Exception as e:
                 log.info("hash_batch خطا: %s", e)
                 out = {}

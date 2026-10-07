@@ -24,7 +24,7 @@ from app.user_client import UserClient  # noqa: E402
 
 log = logging.getLogger("dup")
 _STARTED_AT = time.time()          # برای uptime_s در /health (قبلاً اشتباهاً از ساعتِ monotonic خوانده می‌شد)
-REV = "2026-10-07-dk18"             # برچسبِ نسخه (در /health دیده می‌شود)
+REV = "2026-10-07-dk19"             # برچسبِ نسخه (در /health دیده می‌شود)
 
 
 def uptime_seconds() -> int:
@@ -66,7 +66,9 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
         st = db.stats()
         kv_gh = db.kv_all()
         rw = bot_app._rw_cached()
-        scan = bot_app.scan or {}
+        scan_snap = bot_app.scan_snapshot() or {}
+        # ⏹ DK-19: «در جریان» یعنی تسکِ زنده وجود دارد — نه پرچمِ جامانده.
+        scan_alive = bool(getattr(bot_app, "_scan_alive", lambda: False)())
         body = {
             "ok": True,
             "app": "dupfinder",
@@ -83,7 +85,8 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
             "hash_sample": db.count_hashed_scope("sample"),
             "stale_scans": int(getattr(bot_app, "_stale_marked", 0) or 0),   # اسکن‌های نیمه‌کارهٔ استارت
             "user_account": bool(getattr(bot_app.user, "ready", False)),
-            "scan_running": bool(scan and not scan.get("done")),
+            "scan_running": scan_alive,
+            "scan_state": str(scan_snap.get("state") or "idle"),
             # 🗄 DK-17: وضعیتِ پشتیبانِ گیتهاب (بی‌راز)
             "gh_repo": str(getattr(bot_app, "_gh_repo", lambda: "")() or ""),
             "gh_path": str(getattr(bot_app, "_gh_path", lambda: "")() or ""),
@@ -104,8 +107,8 @@ async def health_server(db: Db, bot_app: BotApp, port: int) -> None:
             "hash_mode": str(getattr(bot_app.settings, "hash_mode", "") or ""),
             "hash_scope": str(getattr(bot_app.settings, "hash_scope", "") or ""),
             "hash_full_max_mb": int(getattr(bot_app.settings, "hash_full_max_mb", 0) or 0),
-            **{("scan_" + k): v for k, v in (bot_app.scan_snapshot() or {}).items()
-               if k in ("state", "phase", "pct", "hashed", "hash_total", "note", "channel", "age_s")},
+            **{("scan_" + k): v for k, v in scan_snap.items()
+               if k in ("phase", "pct", "hashed", "hash_total", "note", "channel", "age_s")},
         }
         return web.json_response(body)
 

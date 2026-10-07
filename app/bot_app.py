@@ -20,7 +20,7 @@ from . import backup as B                     # 💾 DK-16: پشتیبانِ ه�
 from . import gh_backup as G                  # 🗄 DK-17: پشتیبانِ گیتهاب
 from . import railway as RW                   # 🚂 DK-18: اعتبار/روزِ باقی‌ماندهٔ Railway
 
-APP_REV = "2026-10-07-dk18"                   # همان REVِ main.py (در فایلِ پشتیبان می‌آید)
+APP_REV = "2026-10-07-dk19"                   # همان REVِ main.py (در فایلِ پشتیبان می‌آید)
 
 log = logging.getLogger("dup.bot")
 
@@ -805,11 +805,114 @@ class BotApp:
             log.info("⏹ %d اسکنِ نیمه‌کاره «متوقف‌شده» علامت خورد.", n)
         return n
 
+    def _scan_alive(self) -> bool:
+        """آیا **واقعاً** اسکنی در جریان است؟ (نه یک پرچمِ کهنه)
+
+        باگِ گزارش‌شده: «⏳ یک اسکن در جریان است» در حالی که هیچ اسکنی نمی‌چرخید. ملاک
+        باید خودِ تسک باشد، نه پرچمِ `self.scan`؛ وگرنه یک پرچمِ جامانده کاربر را تا ابد
+        از اسکن‌کردن محروم می‌کند.
+        """
+        sc = self.scan or {}
+        if not sc or sc.get("done"):
+            return False
+        task = sc.get("task")
+        if task is not None:
+            return not task.done()
+        # فاصلهٔ ساختِ پیام تا ساختِ تسک چند میلی‌ثانیه است؛ بیشتر از این یعنی تسک
+        # هرگز ساخته نشده (مثلاً خطا پیش از create_task خورده است).
+        return (time.time() - float(sc.get("started") or 0)) < float(self.SCAN_START_GRACE)
+
+    async def _clear_ghost_scan(self) -> int:
+        """پرچمِ «اسکن در جریان» که هیچ اسکنی پشتش نیست را آزاد می‌کند.
+
+        ردیف‌های `running` جامانده در دیتابیس هم «متوقف‌شده» ثبت می‌شوند تا در /health و
+        گزارش‌ها دروغ نگویند.
+        """
+        n = 0
+        try:
+            n = await self.mark_stale_scans()
+        except Exception as e:
+            log.info("پاک‌سازیِ اسکنِ کهنه: %s", e)
+        self.scan = None
+        return n
+
+    async def _mark_scan_stopped(self, chat: int, *, forced: bool = False) -> None:
+        """ثبتِ «کنسل‌شده» وقتی خودِ اسکنر مجالِ ثبت پیدا نکرد (قطعِ اجباری).
+
+        بدونِ این، ردیف در دیتابیس `running` می‌مانْد و گزارشِ پایان هم نمی‌آمد؛
+        یعنی همان چیزی که کاربر دید: «درخواستِ توقف فرستاده شد» و بعد سکوت.
+        """
+        sc = self.scan or {}
+        cid = int(sc.get("cid") or 0)
+        sid = int(getattr(sc.get("scanner"), "scan_id", 0) or 0)
+        pr = getattr(sc.get("scanner"), "progress", None)
+        now = int(time.time())
+        try:
+            if sid:
+                self.db.update_scan(sid, status="canceled", phase="canceled", finished_at=now)
+                self.db.set_channel_scan(cid, sid, now)
+            else:
+                for row in self.db.stale_running_scans():
+                    self.db.update_scan(int(row.get("id") or 0), status="canceled",
+                                        phase="canceled", finished_at=now)
+        except Exception as e:
+            log.info("ثبتِ توقفِ اجباری: %s", e)
+        # پیامِ پیشرفت (اگر هست) به «کنسل‌شده» تغییر می‌کند تا کاربر نداند معلق مانده
+        try:
+            if sc.get("msg_id"):
+                title = str((sc.get("channel") or {}).get("title") or "")
+                await self.api.edit_message_text(
+                    chat, int(sc["msg_id"]),
+                    R.progress_text("canceled", R.channel_title(sc.get("channel") or {}) or title,
+                                    float(getattr(pr, "pct", 0.0) or 0.0),
+                                    hashed=int(getattr(pr, "hashed", 0) or 0),
+                                    hash_total=int(getattr(pr, "hash_total", 0) or 0),
+                                    note="توقفِ اجباری (دانلود پاسخ نمی‌داد)" if forced else "توقف"),
+                    kb=None)
+        except Exception as e:
+            log.info("ویرایشِ پیامِ اسکن پس از توقف: %s", e)
+        self.scan = dict(sc, done=True, canceled=True)
+        try:
+            await self.api.send_message(
+                chat, ("⏹ <b>اسکن متوقف شد.</b>\n"
+                       + ("اسکن در دانلود گیر کرده بود؛ به‌اجبار قطع شد تا ربات آزاد شود.\n"
+                          if forced else "")
+                       + "هر وقت خواستید «🔄 ادامهٔ اسکن (فقط جدیدها)» را بزنید — "
+                         "هش‌های موجود دوباره دانلود نمی‌شوند."))
+        except Exception:
+            pass
+
+    async def _cancel_watchdog(self, task: asyncio.Task, chat: int) -> None:
+        """نگهبانِ «⏹ توقف»: اگر اسکن در مهلتِ مقرر نایستاد، اجباری قطعش می‌کند.
+
+        باگِ گزارش‌شده: اسکن در دانلودِ جزئی گیر می‌کرد و «⏹ توقف» فقط پیامِ «درخواست
+        فرستاده شد» را می‌داد؛ نه کنسل می‌شد و نه گزارشِ پایانی می‌آمد.
+        """
+        try:
+            await asyncio.wait({task}, timeout=float(self.CANCEL_GRACE))
+        except Exception as e:
+            log.info("نگهبانِ توقف (انتظار): %s", e)
+        if task.done():
+            return
+        log.info("⏹ اسکن در %.0f ثانیه نایستاد ⇒ قطعِ اجباری", float(self.CANCEL_GRACE))
+        task.cancel()
+        try:
+            await asyncio.wait({task}, timeout=10.0)
+        except Exception:
+            pass
+        await self._mark_scan_stopped(chat, forced=True)
+
     def scan_snapshot(self) -> Dict[str, Any]:
         """وضعیتِ اسکن برای /health — فاز، درصد، «هش‌شده از کل» و یادداشت."""
         sc = self.scan or {}
         if not sc:
             return {"state": "idle"}
+        if not sc.get("done") and not self._scan_alive():
+            # اسکنِ نیمه‌کاره‌ای که تسکِ زنده ندارد ⇒ «کهنه»، نه «در جریان» (DK-19)
+            return {"state": "stale", "channel": str((sc.get("channel") or {}).get("title") or ""),
+                    "cid": int(sc.get("cid") or 0),
+                    "age_s": int(time.time() - float(sc.get("started") or time.time())),
+                    "note": "اسکنِ کهنه (تسکی در جریان نیست)"}
         out: Dict[str, Any] = {"state": "running" if not sc.get("done") else "finished",
                                "channel": str((sc.get("channel") or {}).get("title") or ""),
                                "cid": int(sc.get("cid") or 0),
@@ -832,6 +935,10 @@ class BotApp:
     # ═════════════════════════ 🚂 DK-18: حسابِ Railway ═════════════════════════
 
     RW_TTL = 900          # هر ۱۵ دقیقه یک‌بار تازه می‌شود (ضدِ درخواستِ زیاد)
+    # ⏹ مهلت‌های توقف (DK-19): اگر اسکن در این مدت نایستاد، اجباری قطع می‌شود؛ و اگر پرچمِ
+    # «در جریان» بدونِ تسکِ زنده ماند، کهنه حساب می‌شود تا کاربر گیر نکند.
+    SCAN_START_GRACE = 30.0
+    CANCEL_GRACE = 20.0
 
     def _rw_token(self) -> str:
         return str(self.db.kv_get("railway:token", "") or self.settings.railway_token or "").strip()
@@ -1760,7 +1867,7 @@ class BotApp:
                      "هش‌شده: <b>%s</b>" % "{:,}".format(st["hashed"]),
                      "اسکن‌ها: <b>%s</b> · گروه‌های تکراری: <b>%s</b>" % (st["scans"], st["groups"]),
                      "حسابِ کاربری: %s" % ("✅ وصل" if getattr(self.user, "ready", False) else "❌ وصل نیست"),
-                     "اسکنِ جاری: %s" % ("⏳ بله" if (self.scan and not self.scan.get("done")) else "—")]
+                     "اسکنِ جاری: %s" % ("⏳ بله" if self._scan_alive() else "—")]
             await self.api.send_message(chat, "\n".join(lines))
         elif cmd in ("check", "checkgroup", "mirror"):
             await self._check_menu(chat)
@@ -1805,7 +1912,7 @@ class BotApp:
         self.pending.pop(chat, None)
         st = self.db.stats()
         acc = "✅ وصل" if getattr(self.user, "ready", False) else "❌ وصل نیست"
-        scanning = "⏳ یک اسکن در جریان است" if (self.scan and not self.scan.get("done")) else "آماده"
+        scanning = "⏳ یک اسکن در جریان است" if self._scan_alive() else "آماده"
         text = ("🏠 <b>منوی اصلی</b>\n\n"
                 "📡 کانال‌ها: <b>%s</b> · 🎬 فایل‌ها: <b>%s</b>\n"
                 "🔁 گروه‌های تکراریِ یافته‌شده: <b>%s</b>\n"
@@ -1823,7 +1930,7 @@ class BotApp:
         rows.append([R.btn("💾 پشتیبانِ هش‌ها (نسخه‌گیری و بازگرداندن)", "bk:menu")])
         rows.append([R.btn("🚂 ریلوی (اعتبار و روزهای مانده)", "rw:menu")])
         rows.append([R.btn("❓ راهنما", "help")])
-        if self.scan and not self.scan.get("done"):
+        if self._scan_alive():
             rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
         if m:
             await self.api.send_message(chat, text, kb=R.kb(rows))
@@ -2013,7 +2120,7 @@ class BotApp:
         if last:
             rows.append([R.btn("📊 نتیجهٔ آخرین اسکن", "s:%d:%d" % (int(last["id"]), cid)),
                          R.btn("🔁 گروه‌های تکراری", "l:%d:%d:all:0" % (int(last["id"]), cid))])
-        if self.scan and not self.scan.get("done"):
+        if self._scan_alive():
             rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
         if R.title_unknown(c):
             rows.append([R.btn("✏️ نامِ کانال را دستی بگذار (یا یک پستش را فوروارد کنید)",
@@ -3116,9 +3223,14 @@ class BotApp:
         if not c:
             await self.api.send_message(chat, "کانال پیدا نشد.")
             return
-        if self.scan and not self.scan.get("done"):
+        if self._scan_alive():
             await self.api.send_message(chat, "⏳ یک اسکن در جریان است. اول «⏹ توقف» را بزنید یا تمام شود.")
             return
+        if self.scan and not self.scan.get("done"):
+            # پرچمِ کهنه (تسک مرده یا ساخته‌نشده) — آزادش می‌کنیم تا کاربر گیر نکند
+            frozen = int(time.time() - float(self.scan.get("started") or time.time()))
+            log.info("پرچمِ اسکنِ کهنه (%.0f ثانیه) پاک شد؛ اسکنِ تازه شروع می‌شود.", frozen)
+            await self._clear_ghost_scan()
         if not getattr(self.user, "ready", False):
             await self.api.send_message(
                 chat,
@@ -3255,13 +3367,25 @@ class BotApp:
                 log.info("نوتیفِ پایانِ اسکن به %s نرسید: %s", t, e)
 
     async def _cancel_scan(self, chat: int) -> None:
-        if not self.scan or self.scan.get("done"):
-            await self.api.send_message(chat, "ℹ️ اسکنی در جریان نیست.")
+        """«⏹ توقف» — سه لایه تا واقعاً بایستد.
+
+        ① خودِ اسکنر سیگنال می‌گیرد و **داخلِ هر فایل** هم چک می‌شود (نه فقط بینِ دسته‌ها).
+        ② اگر تا `CANCEL_GRACE` ثانیه نایستاد، تسک اجباری قطع و وضعیت «کنسل‌شده» ثبت می‌شود.
+        ③ اگر پرچمِ کهنه باشد (اسکنی وجود ندارد)، پاک می‌شود تا کاربر از گیر خارج شود.
+        """
+        if not self._scan_alive():
+            n = await self._clear_ghost_scan()
+            tail = (" (%d ردیفِ نیمه‌کاره هم «متوقف‌شده» علامت خورد)" % n) if n else ""
+            await self.api.send_message(
+                chat, "ℹ️ اسکنی در جریان نیست%s.\nاز همین حالا می‌توانید اسکن کنید." % tail)
             return
         sc = self.scan.get("scanner")
         if sc:
             sc.cancel()
         await self.api.send_message(chat, "⏹ درخواستِ توقف فرستاده شد…")
+        task = self.scan.get("task")
+        if task is not None and not task.done():
+            asyncio.create_task(self._cancel_watchdog(task, chat))
 
     async def _scan_limited(self, chat: int, cid: int) -> None:
         """اسکنِ محدود (بدونِ حسابِ کاربری) از **پیش‌نمایشِ عمومیِ** `t.me/s/<username>`.

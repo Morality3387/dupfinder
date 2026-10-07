@@ -11,7 +11,7 @@ import hashlib
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.tg_api import TgError
-from app.user_client import _kind_ok, chunk_plan
+from app.user_client import HashCanceled, _kind_ok, chunk_plan
 
 
 class FakeApi:
@@ -458,11 +458,18 @@ class FakeUser:
         return out.get(int(msg_id), ("", ""))
 
     async def hash_batch(self, tg_id: int, items: Sequence[Tuple[int, int]], *, scope: str = "sample",
-                         full_max_bytes: int = 0) -> Dict[int, Tuple[str, str]]:
+                         full_max_bytes: int = 0, cancel=None, item_timeout: float = 0.0,
+                         stats: Optional[Dict[str, Any]] = None) -> Dict[int, Tuple[str, str]]:
+        """همان امضای `app.user_client.hash_batch` — با احترام به `cancel` (DK-19).
+
+        (اگر امضا عقب بماند، اسکنر kwargs تازه می‌فرستد و کلِ هش‌گذاری بی‌صدا خالی می‌ماند.)
+        """
         self.hash_batches.append(len(items))
         want_full = str(scope or "sample").lower() == "full"
         out: Dict[int, Tuple[str, str]] = {}
         for msg_id, size in items:
+            if callable(cancel) and cancel():
+                raise HashCanceled()
             data = self.contents.get((int(tg_id), int(msg_id)))
             if data is None:
                 out[int(msg_id)] = ("", "")

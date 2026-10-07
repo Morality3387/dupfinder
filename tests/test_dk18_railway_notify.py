@@ -287,4 +287,4 @@ def test_startup_refresh_and_health_keys():
     assert body["railway_token"] is True and body["railway_plan"] == "HOBBY"
     assert body["railway_days_left"] == 29 and body["railway_credit"] == 5.0
     assert body["railway_credit_left"] == 4.9 and body["railway_usage"] == 0.1
-    assert body["rev"] == "2026-10-07-dk18"
+    assert body["rev"] == "2026-10-07-dk19"

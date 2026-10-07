@@ -10,12 +10,65 @@ import asyncio
 import hashlib
 import logging
 import re
-from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger("dup.user")
 
 CHUNK = 131072        # ۱۲۸KB — تکهٔ «نمونه‌ای» (سر/میانه/ته)
 FULL_CHUNK = 524288   # ۵۱۲KB — تکهٔ حالتِ «هشِ کامل» (مضربِ ۴۰۹۶)
+
+# ⏱ سقفِ انتظار برای هشِ **یک** فایل. اگر دانلودش گیر کند (اتصالِ تلگرام قطع شود،
+# سِرور جواب ندهد…)، فایل رد می‌شود و اسکن ادامه می‌یابد — قبلاً اسکن تا ابد
+# داخلِ همین انتظار می‌مانْد و «⏹ توقف» هم اثری نداشت (باگِ گزارش‌شده).
+HASH_ITEM_TIMEOUT = 240.0
+
+
+class HashCanceled(Exception):
+    """لغوِ هش‌گذاری به‌خواستهٔ کاربر («⏹ توقف») — نگهبانِ گروهی این را می‌اندازد."""
+
+
+async def guarded_gather(coros: Sequence[Any], *, cancel: Optional[Callable[[], bool]] = None,
+                         poll: float = 0.5,
+                         item_timeout: Optional[float] = None) -> Dict[str, Any]:
+    """اجرای هم‌زمانِ کارها با دو نگهبان: «لغوِ کاربر» و «مهلتِ هر کار».
+
+    چرا دستی و نه `asyncio.gather`: گَدر بدونِ نگهبان است؛ اگر یکی از دانلودها هرگز
+    برنگردد (اتصالِ قطع‌شده)، تا ابد منتظر می‌مانَد و کاربر هیچ راهی برای بیرون‌آمدن
+    ندارد. اینجا هر `poll` ثانیه شرطِ لغو چک می‌شود و تسک‌های معلق قطع می‌شوند.
+
+    خروجی: `{"results": [...], "canceled": bool, "timeouts": int}` — نتیجهٔ هر کار
+    به **ترتیبِ ورودی**؛ کارِ خطادار/مهلت‌تمام‌شده/لغوشده `None` می‌شود.
+    """
+    if not coros:
+        return {"results": [], "canceled": False, "timeouts": 0}
+    timeout = float(item_timeout) if item_timeout and item_timeout > 0 else None
+    tasks = [asyncio.ensure_future(asyncio.wait_for(c, timeout) if timeout else c) for c in coros]
+    pending = set(tasks)
+    canceled = False
+    while pending:
+        await asyncio.wait(pending, timeout=float(poll), return_when=asyncio.FIRST_COMPLETED)
+        pending = {t for t in pending if not t.done()}
+        if pending and callable(cancel) and cancel():
+            canceled = True
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            break
+    results: List[Any] = []
+    timeouts = 0
+    for t in tasks:
+        if t.cancelled():
+            results.append(None)
+            continue
+        exc = t.exception()
+        if exc is not None:
+            if isinstance(exc, asyncio.TimeoutError):
+                timeouts += 1
+                log.info("مهلتِ %s ثانیه‌ایِ یک کار تمام شد ⇒ رد شد", timeout)
+            results.append(None)
+        else:
+            results.append(t.result())
+    return {"results": results, "canceled": canceled, "timeouts": timeouts}
 
 
 def _is_video_kind(mime: str, kind: str) -> bool:
@@ -622,13 +675,21 @@ class UserClient:
 
     async def hash_batch(self, tg_id: int, items: Sequence[Tuple[int, int]],
                          *, concurrency: int = 3, scope: str = "sample",
-                         full_max_bytes: int = 0) -> Dict[int, Tuple[str, str]]:
+                         full_max_bytes: int = 0,
+                         cancel: Optional[Callable[[], bool]] = None,
+                         item_timeout: float = HASH_ITEM_TIMEOUT,
+                         stats: Optional[Dict[str, Any]] = None) -> Dict[int, Tuple[str, str]]:
         """هشِ گروهی: پیام‌ها را یک‌جا می‌گیرد و تکه‌های هر فایل را با محدودیتِ هم‌زمانی می‌خواند.
 
         ورودی: [(msg_id, size), …]   خروجی: {msg_id: (هش، دامنه)}
         هیچ فایلی دانلودِ کامل یا پاک نمی‌شود: در حالتِ نمونه‌ای فقط سر/میانه/دُم،
         و در حالتِ `scope="full"` کلِ فایل (فقط برای فایل‌های کوچک‌تر از
         `full_max_bytes`؛ بزرگ‌ترها خودکار به نمونه‌ای برمی‌گردند تا اسکن از پا نیفتد).
+
+        `cancel`: تابعی که «آیا کاربر توقف زده؟» را برمی‌گرداند — هر نیم‌ثانیه چک می‌شود
+        و در صورتِ لغو، `HashCanceled` می‌اندازد (به‌جای انتظارِ بی‌پایان).
+        `item_timeout`: سقفِ انتظارِ هر فایل (ثانیه) — فایلِ گیرکرده رد می‌شود و
+        شمارشش در `stats["timeouts"]` می‌آید تا در گزارش به کاربر گفته شود.
         """
         out: Dict[int, Tuple[str, str]] = {}
         todo = [(int(m), int(s or 0)) for m, s in (items or [])]
@@ -661,9 +722,15 @@ class UserClient:
                 use = "full" if (want_full and (not full_max_bytes or size <= full_max_bytes)) else "sample"
                 return await self._hash_msg(msg, size, scope=use)
 
-        results = await asyncio.gather(*[work(m, s) for m, s in todo], return_exceptions=True)
-        for (msg_id, _size), r in zip(todo, results):
+        g = await guarded_gather([work(m, s) for m, s in todo], cancel=cancel,
+                                 item_timeout=item_timeout)
+        if stats is not None and int(g.get("timeouts") or 0):
+            stats["timeouts"] = int(stats.get("timeouts") or 0) + int(g["timeouts"])
+        for (msg_id, _size), r in zip(todo, g["results"]):
             out[msg_id] = r if isinstance(r, tuple) else ("", "")
+        if g.get("canceled"):
+            # ⏹ کاربر توقف زده ⇒ بدونِ ادامهٔ دسته، بالا برو تا «کنسل‌شده» ثبت شود.
+            raise HashCanceled()
         self.hash_batches.append(len(todo))
         return out
 
