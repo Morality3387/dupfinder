@@ -31,10 +31,32 @@ class FakeApi:
         self.fail_copy_ids: set = set()
         self.updates: List[Dict[str, Any]] = []
         self.member_status: Dict[Tuple[int, int], str] = {}
+        # 🚫 DK-15: چت‌هایی که ربات در آن‌ها «دسترسی ندارد» (برای تستِ هشدارِ قطعِ ارسال)
+        self.blocked: set = set()
 
     # ── ابزار ──
     def _log(self, method: str, **params: Any) -> None:
         self.calls.append((method, params))
+
+    def _resolve(self, chat_id: Any) -> Any:
+        """مثلِ تلگرام: «@username» به شناسهٔ عددیِ همان چت تبدیل می‌شود (DK-15: گروهِ چک)."""
+        if isinstance(chat_id, str):
+            s = chat_id.strip()
+            if s.startswith("@"):
+                for cid, c in self.chats.items():
+                    if ("@" + str(c.get("username") or "")) == s:
+                        return int(cid)
+                return s
+            if s.lstrip("-").isdigit():
+                return int(s)
+        return chat_id
+
+    def _is_blocked(self, chat_id: Any) -> bool:
+        rid = self._resolve(chat_id)
+        for b in getattr(self, "blocked", set()):
+            if str(b) == str(rid):
+                return True
+        return False
 
     def messages_with(self, text: str) -> List[Dict[str, Any]]:
         return [m for m in self.sent if text in str(m.get("text") or "")]
@@ -57,6 +79,9 @@ class FakeApi:
                            parse_mode: str = "HTML", preview: bool = False, silent: bool = False,
                            reply_to: Optional[int] = None,
                            kb_extra: Optional[dict] = None) -> Dict[str, Any]:
+        if self._is_blocked(chat_id):
+            raise TgError("sendMessage", 403, "CHAT_WRITE_FORBIDDEN")
+        chat_id = self._resolve(chat_id)
         self._mid += 1
         rec = {"message_id": self._mid, "chat_id": int(chat_id), "text": text,
                "kb": kb if kb is not None else kb_extra, "parse_mode": parse_mode}
@@ -86,14 +111,42 @@ class FakeApi:
 
     async def forward_message(self, to_chat: int, from_chat: int, message_id: int) -> Dict[str, Any]:
         self._log("forwardMessage", chat_id=to_chat, from_chat_id=from_chat, message_id=message_id)
+        if self._is_blocked(to_chat):
+            raise TgError("forwardMessage", 403, "CHAT_WRITE_FORBIDDEN")
+        to_chat = self._resolve(to_chat)
         if int(message_id) in self.fail_forward_ids:
             raise TgError("forwardMessage", 400, "CHAT_FORWARDS_RESTRICTED")
         self.forwards.append({"to": int(to_chat), "from": int(from_chat), "msg_id": int(message_id)})
         self._mid += 1
         return {"message_id": self._mid}
 
+    async def send_media_group(self, to_chat: int, from_chat: int, message_ids: List[int]) -> List[Dict[str, Any]]:
+        """📎 ارسالِ آلبومی (DK-15): همان پیام‌ها یک‌جا ⇒ فایل دوباره آپلود نمی‌شود."""
+        ids = [int(x) for x in (message_ids or [])][:10]
+        self._log("sendMediaGroup", chat_id=to_chat, from_chat_id=from_chat, message_ids=ids)
+        if self._is_blocked(to_chat):
+            raise TgError("sendMediaGroup", 403, "CHAT_WRITE_FORBIDDEN")
+        to_chat = self._resolve(to_chat)
+        if any(i in self.fail_forward_ids for i in ids):
+            raise TgError("sendMediaGroup", 400, "CHAT_FORWARDS_RESTRICTED")
+        if not ids:
+            raise TgError("sendMediaGroup", 400, "MEDIA_GROUP_INVALID")
+        self.forwards.append({"to": int(to_chat), "from": int(from_chat), "ids": ids,
+                              "msg_id": ids[0], "album": True})
+        self._mid += 1
+        return [{"message_id": self._mid}]
+
+    async def edit_message_reply_markup(self, chat_id: int, message_id: int, *,
+                                        kb: Optional[Dict[str, Any]] = None) -> Any:
+        self.edits.append({"chat_id": int(chat_id), "message_id": int(message_id), "kb": kb})
+        self._log("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id, reply_markup=kb)
+        return True
+
     async def copy_message(self, to_chat: int, from_chat: int, message_id: int) -> Dict[str, Any]:
         self._log("copyMessage", chat_id=to_chat, from_chat_id=from_chat, message_id=message_id)
+        if self._is_blocked(to_chat):
+            raise TgError("copyMessage", 403, "CHAT_WRITE_FORBIDDEN")
+        to_chat = self._resolve(to_chat)
         if int(message_id) in self.fail_copy_ids:
             raise TgError("copyMessage", 400, "CHAT_FORWARDS_RESTRICTED")
         self._mid += 1
@@ -168,6 +221,7 @@ class FakeUser:
         self.delay = float(delay)
         self.total_hint = int(total_hint)
         self.hints: Dict[int, Dict[str, Any]] = {}
+        self.blocked: set = set()                 # 🚫 چت‌هایی که فورواردِ کاربری به آن‌ها ممکن نیست
         self.peer_hashes: Dict[int, int] = {}
         self.entity_misses: List[int] = []
         self.hash_batches: List[int] = []
@@ -348,6 +402,8 @@ class FakeUser:
         return out
 
     async def forward(self, to_chat: int, tg_id: int, msg_ids: Sequence[int]) -> bool:
+        if any(str(b) == str(to_chat) for b in getattr(self, "blocked", set())):
+            return False
         self.forwarded.append({"to": int(to_chat), "from": int(tg_id), "ids": list(msg_ids)})
         return True
 

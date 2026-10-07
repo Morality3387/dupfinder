@@ -98,6 +98,12 @@ def scan_summary_text(scan: Dict[str, Any], channel: Dict[str, Any], counts: Dic
         lines += ["", "⚠️ خطا: <code>%s</code>" % esc(str(scan.get("error"))[:200])]
     for nt in (notes or []):
         lines += ["", "⚠️ %s" % esc(str(nt))]
+    if int(scan.get("groups_found") or 0) > 0:
+        # DK-15: کاربر باید بداند ارسال به «گروهِ چک» **خودکار نیست** و فقط با دکمه انجام می‌شود
+        lines += ["", "📤 <b>گروهِ چک:</b> می‌خواهید این تکراری‌ها برای بازبینی به گروه/کانالِ خودتان "
+                      "برود؟ دکمهٔ «📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست» را بزنید — "
+                      "<b>بدونِ سقفِ تعداد</b> و هر گروه با تکراری‌هایش <b>کنارِ هم</b>. "
+                      "<i>خودکار هیچ‌وقت نمی‌فرستد.</i>"]
     lines += ["", "<i>اولویتِ بررسی: ۱) نام ۲) کپشن ۳) حجم+زمان — هشِ <b>کامل</b> تأییدِ قطعی است "
                    "و هشِ نمونه‌ای (سه‌تکه) فقط نشانهٔ قوی است.</i>",
               "<i>ℹ️ یک گروه می‌تواند چند دلیل داشته باشد، پس جمعِ ردیف‌های بالا از تعدادِ گروه‌ها بیشتر است.</i>"]
@@ -115,8 +121,13 @@ def groups_page_text(channel: Dict[str, Any], groups: Sequence[Dict[str, Any]], 
     for g in groups:
         stars = STARS.get(int(g.get("strength") or 0), "★")
         reason = esc(g.get("reason") or "")
-        lines.append("🔸 <b>#%s</b> · %s · <b>%s فایل</b>\n    دلیل: %s" % (
-            g.get("id"), stars, _num(g.get("count")), reason))
+        # DK-15: وضعیتِ همان گروه («✔ رسیدگی‌شده / 🔒 نادیده») باید **در خودِ فهرست** دیده شود،
+        # نه فقط داخلِ صفحهٔ گروه — خواستهٔ کاربر: «تیک در قسمتِ لیست هم بخورد».
+        state = str(g.get("state") or "open")
+        mark = ("   ✔ رسیدگی‌شده" if state == "done"
+                else ("   🔒 نادیده" if state == "ignored" else "   —"))
+        lines.append("🔸 <b>#%s</b> · %s · <b>%s فایل</b>%s\n    دلیل: %s" % (
+            g.get("id"), stars, _num(g.get("count")), mark, reason))
     lines.append("")
     lines.append("<i>روی هر گروه بزنید تا فایل‌ها را ببینید و با فوروارد به چت خودتان بفرستید.</i>")
     lines.append("<i>فیلترها هم‌پوشانی دارند: گروهِ ★★★★ در «حجم+زمان» و «نام» هم دیده می‌شود.</i>")
@@ -255,8 +266,10 @@ def groups_kb(channel_id: int, scan_id: int, filt: str, page: int, pages: int,
     rows: List[List[Dict[str, str]]] = []
     for g in page_groups:
         stars = STARS.get(int(g.get("strength") or 0), "★")
-        rows.append([btn("%s #%s · %s فایل · %s" % (stars, g.get("id"), g.get("count"),
-                                                  (g.get("reason") or "")[:28]),
+        state = str(g.get("state") or "open")
+        mark = "✔ " if state == "done" else ("🔒 " if state == "ignored" else "")   # DK-15: تیک در فهرست
+        rows.append([btn("%s%s #%s · %s فایل · %s" % (mark, stars, g.get("id"), g.get("count"),
+                                                    (g.get("reason") or "")[:28]),
                          "g:%d:%d:%s:%d:%d" % (scan_id, channel_id, filt, page, int(g.get("id"))))])
     frow = []
     for f in FILTERS:
@@ -273,6 +286,8 @@ def groups_kb(channel_id: int, scan_id: int, filt: str, page: int, pages: int,
                btn("▶", "p:%d:%d:%s:%d" % (scan_id, channel_id, filt, min(pages - 1, page + 1))),
                btn("⏭", "p:%d:%d:%s:%d" % (scan_id, channel_id, filt, pages - 1))]
         rows.append(nav)
+    rows.append([btn("📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست",
+                     "cs:%d:%d" % (scan_id, channel_id))])
     rows.append([btn("🔄 به‌روزرسانی", "p:%d:%d:%s:%d" % (scan_id, channel_id, filt, page)),
                  btn("📊 خلاصهٔ اسکن", "s:%d:%d" % (scan_id, channel_id))])
     rows.append([btn("🏠 کانال‌ها", "ch:list")])
@@ -283,7 +298,9 @@ def group_kb(channel_id: int, scan_id: int, filt: str, page: int, gid: int, *,
              can_forward: bool = True) -> Dict[str, Any]:
     head = [[btn("📎 فوروارد فایل‌های این گروه",
                  "f:%d:%d:%s:%d:%d" % (scan_id, channel_id, filt, page, gid))]] if can_forward else []
-    return kb(head + [
+    chk = [[btn("📤 همین گروه به گروهِ چک",
+                "csrf:%d:%d:%d" % (scan_id, channel_id, gid))]] if can_forward else []
+    return kb(head + chk + [
         [btn("🔗 لینکِ پیام‌ها", "u:%d:%d:%d" % (scan_id, channel_id, gid))],
         [btn("✔ رسیدگی شد", "m:%d:%d:%d:done" % (scan_id, channel_id, gid)),
          btn("🔒 نادیده بگیر", "m:%d:%d:%d:ign" % (scan_id, channel_id, gid))],
@@ -340,32 +357,69 @@ class Reporter:
         return {"sent": sent, "failed": failed, "offset": offset + len(chunk),
                 "remaining": max(0, len(members) - (offset + len(chunk))), "total": len(members)}
 
-    async def _forward_one(self, owner_chat: int, channel: Dict[str, Any], msg_id: int, member: Dict[str, Any]) -> bool:
+    async def forward_each(self, owner_chat: Any, channel: Dict[str, Any],
+                           members: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """➡️ DK-15: **همهٔ** اعضای یک گروه را تک‌به‌تک می‌فرستد — بدونِ سقفِ تعداد.
+
+        خواستهٔ کاربر: «یک دکمه باشد، همه‌جا برایم فوروارد کند، خودش تا آخر». پس این مسیر
+        هیچ سقفی (`max_per_group`) ندارد و دکمهٔ «ادامه» هم لازم نیست؛ چون همه در یک نوبت می‌رود
+        و گزارشِ پایانی می‌گوید چند تا رفت و چند تا نرفت.
+
+        خروجی: `sent` = فایلِ واقعاً فوروارد/کپی‌شده · `links` = موردی که فقط **لینک** رفته
+        (وقتی ربات اجازهٔ فوروارد ندارد) · `failed` = چیزی که حتی لینک هم نشد.
+        """
+        members = [m for m in members if str(m.get("state") or "") != "ignored"]
+        sent, links, failed = 0, 0, []
+        for m in members:
+            mid = int(m.get("msg_id") or 0)
+            kind = await self._forward_one_kind(owner_chat, channel, mid, m)
+            if kind in ("bot", "user", "copy"):
+                sent += 1
+            elif kind == "link":
+                links += 1
+            else:
+                failed.append(mid)
+        return {"sent": sent, "links": links, "failed": failed, "total": len(members),
+                "offset": len(members), "remaining": 0}
+
+    async def _forward_one(self, owner_chat: Any, channel: Dict[str, Any], msg_id: int,
+                           member: Dict[str, Any]) -> bool:
+        """سازگاریِ عقب‌رو: آیا پیام (فایل یا لینک) فرستاده شد؟"""
+        return (await self._forward_one_kind(owner_chat, channel, msg_id, member)) != ""
+
+    async def _forward_one_kind(self, owner_chat: Any, channel: Dict[str, Any], msg_id: int,
+                                member: Dict[str, Any]) -> str:
+        """کدام مسیر جواب داد؟ `bot` (ربات) · `user` (حسابِ کاربری) · `copy` · `link` · `` (هیچ).
+
+        تفکیکِ «فایل» از «لینک» مهم است: خواستهٔ کاربر این بود که اگر ربات اجازهٔ فوروارد
+        نداشت، **هشدارِ روشن** ببیند نه اینکه فکر کند فایل‌ها رفته‌اند.
+        """
         tg_id = int(channel.get("tg_id") or 0)
         # ۱) فوروارد با ربات (خروجیِ «برو تو کانال ببین» همین است)
         try:
             await self.api.forward_message(owner_chat, tg_id, msg_id)
-            return True
+            return "bot"
         except Exception as e:
             log.info("forward ربات ناموفق (msg=%s): %s", msg_id, e)
         # ۲) فوروارد با حسابِ کاربری
         if self.user is not None and getattr(self.user, "ready", False):
             try:
                 if await self.user.forward(owner_chat, tg_id, [msg_id]):
-                    return True
+                    return "user"
             except Exception as e:
                 log.info("forward کاربری ناموفق: %s", e)
-        # ۳) کپی + لینک (اگر محتوا محافظت‌شده باشد، فقط لینک)
+        # ۳) کپی (محتوا قفل نباشد)
         try:
             await self.api.copy_message(owner_chat, tg_id, msg_id)
-            return True
+            return "copy"
         except Exception:
             pass
+        # ۴) آخرین راه: لینکِ پست (فایل نمی‌رود — در گزارش جدا شمرده می‌شود)
         link = msg_link(channel, msg_id)
         if link:
             try:
                 await self.api.send_message(owner_chat, "🔗 %s\n%s" % (esc((member.get("file_name") or "")[:60]), link))
-                return True
+                return "link"
             except Exception:
                 pass
-        return False
+        return ""

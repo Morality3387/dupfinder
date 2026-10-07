@@ -448,6 +448,40 @@ class Db:
         return cur.rowcount or 0
 
     # ═══════════════ scans ═══════════════
+    def reset_results(self, channel_id: int, *, keep_scan_id: int = 0) -> Dict[str, int]:
+        """🧹 DK-15: نتایجِ اسکن‌های قبلیِ یک کانال را پاک می‌کند (خواستهٔ کاربر:
+        «اسکنِ جدید، تاریخچهٔ اسکنِ قبلی را پاک کند — انگار از نو اسکن زده»).
+
+        چه چیزی پاک می‌شود: ردیف‌های `groups`/`group_members` و ردیف‌های `scans` و
+        کلیدهای وضعیتِ فوروارد (`fwd:`/`mir:`) همان اسکن‌های قدیمی.
+        چه چیزی **نمی‌شود**: `files` (ایندکس و هش‌ها) دست‌نخورده می‌مانند تا اسکنِ تازه
+        سریع باشد و لازم نباشد همه‌چیز از صفر هش شود. هیچ فایلی هم در تلگرام لمس نمی‌شود.
+        """
+        olds = [int(r["id"]) for r in self._all(
+            "SELECT id FROM scans WHERE channel_id=? AND id<>?", (int(channel_id), int(keep_scan_id or 0)))]
+        stats = {"scans": 0, "groups": 0, "members": 0, "flags": 0}
+        if not olds:
+            return stats
+        marks = ",".join("?" for _ in olds)
+        cur = self._exec(
+            "DELETE FROM group_members WHERE group_id IN (SELECT id FROM groups WHERE scan_id IN (%s))" % marks,
+            tuple(olds))
+        stats["members"] = int(cur.rowcount or 0)
+        cur = self._exec("DELETE FROM groups WHERE scan_id IN (%s)" % marks, tuple(olds))
+        stats["groups"] = int(cur.rowcount or 0)
+        cur = self._exec("DELETE FROM scans WHERE id IN (%s)" % marks, tuple(olds))
+        stats["scans"] = int(cur.rowcount or 0)
+        for sid in olds:
+            stats["flags"] += self.kv_del_prefix("fwd:%d:" % sid) + self.kv_del_prefix("mir:%d:" % sid)
+        self.conn.commit()
+        return stats
+
+    def kv_del_prefix(self, prefix: str) -> int:
+        """حذفِ کلیدهای kv با پیشوندِ مشخص (برای وضعیتِ فورواردِ اسکن‌های پاک‌شده)."""
+        cur = self._exec("DELETE FROM kv WHERE k LIKE ?", (str(prefix) + "%",))
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
     def create_scan(self, channel_id: int, params: Dict[str, Any], min_id: int = 0) -> int:
         cur = self._exec("INSERT INTO scans(channel_id,started_at,status,phase,min_id,params) VALUES(?,?,?,?,?,?)",
                          (channel_id, now(), "running", "start", int(min_id or 0),

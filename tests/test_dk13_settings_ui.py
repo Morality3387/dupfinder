@@ -18,7 +18,8 @@ ALL_KEYS = [k for _g, ks in SETTING_GROUPS for k in ks]
 
 def test_every_button_has_a_plain_persian_title_and_explanation():
     """هیچ گزینه‌ای نباید بی‌توضیح باشد و همه باید برچسبِ فارسی داشته باشند."""
-    assert len(SETTING_INFO) == len(ALL_KEYS) == 17
+    # DK-15: دو تنظیمِ تازهٔ «گروهِ چک» اضافه شد (مقصد + آلبوم) ⇒ ۱۷ ⇒ ۱۹
+    assert len(SETTING_INFO) == len(ALL_KEYS) == 19
     for k in ALL_KEYS:
         info = SETTING_INFO[k]
         assert info.get("title") and len(info["title"]) <= 26, k

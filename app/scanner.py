@@ -155,8 +155,17 @@ class Scanner:
                   "th_cap_jaccard": cfg.get("th_cap_jaccard"), "size_tol_pct": cfg.get("size_tol_pct"),
                   "dur_tol_s": cfg.get("dur_tol_s")}
         self.scan_id = self.db.create_scan(cid, params, min_id=since)
+        # 🧹 DK-15 (خواستهٔ کاربر): «با اسکنِ جدید، تاریخچهٔ اسکنِ قبلی پاک شود — انگار از نو
+        # اسکن زده». نتایج/گروه‌ها/وضعیتِ فورواردِ اسکن‌های قبلیِ همین کانال پاک می‌شوند تا
+        # لیست و تیک‌های «رسیدگی» و «قبلاً فرستاده شده» از صفر شروع شوند. ایندکس و هشِ
+        # فایل‌ها دست‌نخورده می‌ماند (اسکنِ تازه سریع است) و در تلگرام هیچ‌چیزی لمس نمی‌شود.
+        self._reset_prev = self.db.reset_results(cid, keep_scan_id=int(self.scan_id or 0))
         self.progress = Progress(phase="index", new_since=since, pct=0.0)
         res = ScanResult(scan_id=self.scan_id, channel_id=cid)
+        if self._reset_prev.get("groups"):
+            res.notes.append(
+                "🧹 نتایجِ اسکنِ قبلی پاک شد (%s گروه) — این اسکن از صفر شمرده می‌شود."
+                % self._reset_prev.get("groups"))
         if kinds_changed:
             res.notes.append(
                 "♻️ نوعِ فایل‌های اسکن از «%s» به «%s» عوض شده بود ⇒ این اسکن **خودکار کامل** شد "

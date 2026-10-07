@@ -149,9 +149,30 @@ class TgApi:
         return await self.call("forwardMessage", _throttle_chat=to_chat, chat_id=to_chat,
                                from_chat_id=from_chat, message_id=message_id)
 
+    async def send_media_group(self, to_chat: int, from_chat: int, message_ids: List[int]) -> List[Dict[str, Any]]:
+        """📎 DK-15: ارسالِ چند پیامِ کانال **یک‌جا** (آلبوم) تا فایل‌های هر گروه دوباره‌چرخی نباشند.
+
+        تلگرام این متد را **فقط** با `media` می‌پذیرد؛ `media` همان پیام‌های کانالِ مبدأ است
+        (`{"type":"video","media":"<message_id>","chat_id":…}`) ⇒ فایل دوباره آپلود نمی‌شود و
+        مصرف پهنای‌باند ندارد. اگر تلگرام رد کند، مسیرِ عادی (تک‌تک) ادامه پیدا می‌کند.
+        """
+        ids = [int(x) for x in (message_ids or [])][:10]          # سقفِ آلبوم = ۱۰ قلم
+        if len(ids) < 2:
+            return []
+        media = [{"type": "video", "media": str(mid), "chat_id": int(from_chat)} for mid in ids]
+        res = await self.call("sendMediaGroup", _throttle_chat=to_chat, chat_id=to_chat,
+                              media=media)
+        return list(res or []) if isinstance(res, list) else []
+
     async def copy_message(self, to_chat: int, from_chat: int, message_id: int) -> Dict[str, Any]:
         return await self.call("copyMessage", _throttle_chat=to_chat, chat_id=to_chat,
                                from_chat_id=from_chat, message_id=message_id)
+
+    async def edit_message_reply_markup(self, chat_id: int, message_id: int, *,
+                                        kb: Optional[Dict[str, Any]] = None) -> Any:
+        """✏️ DK-15: فقط دکمه‌های یک پیام عوض می‌شود (مثلاً بعد از «🗑 این گروه را نفرست»)."""
+        return await self.call("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id,
+                               reply_markup=kb or {"inline_keyboard": []})
 
     async def get_chat(self, chat_id: Any) -> Dict[str, Any]:
         return await self.call("getChat", chat_id=chat_id)

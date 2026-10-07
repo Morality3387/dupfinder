@@ -7,7 +7,7 @@ import logging
 import random
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import preview as P
 from . import report as R
@@ -59,6 +59,27 @@ HELP_TEXT = """🤖 <b>رباتِ پیدا کردنِ فیلم‌های تکرا
 • 📡 <b>نامِ کانال:</b> در فهرست همیشه نام دیده می‌شود. اگر نام خوانده نشد، از کارتِ کانال
 «✏️ نامِ کانال را دستی بگذار» را بزنید یا یک <b>پستِ همان کانال</b> را برایم فوروارد کنید.
 • دکمهٔ «🩺 دسترسی‌های لازم» در کارتِ هر کانال، وضعیتِ واقعی را نشان می‌دهد.
+
+📤 <b>گروهِ چک — «تکراری‌ها کنارِ هم، برای بازبینی»:</b> یک <b>گروه یا کانالِ خودتان</b> را به ربات
+معرفی می‌کنید و ربات تکراری‌های هر اسکن را همان‌جا می‌فرستد تا کنارِ هم چک کنید:
+• مقصد را از «⚙️ تنظیمات» ← «📤 گروهِ چک» یا دستورِ <code>/check</code> تعیین کنید — <b>دو راه</b>:
+یک <b>پیامِ همان گروه/کانال</b> را برای ربات <b>فوروارد</b> کنید، یا <code>@یوزرنیم</code>/شناسهٔ عددی
+(<code>-100…</code>) را تایپ کنید.
+• بعد از هر اسکن، خودتان دکمهٔ «📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست» را می‌زنید.
+<b>خودکار هیچ‌وقت نمی‌فرستد</b> و <b>سقفِ تعداد هم ندارد</b>: هر چه پیدا شده می‌رود.
+• در مقصد، هر گروهِ تکراری = یک <b>سرتیترِ خوانا</b> (شماره، دلیل، پستِ اصلی و تکراری‌ها) و بعد
+فایل‌های همان گروه <b>کنارِ هم</b>. هر سرتیتر دکمهٔ «🗑 این گروه را نفرست» دارد.
+• اگر ربات در مقصد <b>ادمین/عضو</b> نباشد یا محتوا محافظت‌شده باشد، <b>هشدارِ روشن</b> + راهِ‌حل
+می‌گیرید (شکستِ خاموش نداریم)؛ دکمه‌های «📊 وضعیت»، «▶️ ادامه»، «🔁 همه را از نو» و
+«✔ همهٔ گروه‌ها رسیدگی‌شده» همیشه زیرِ همان پیام هست.
+
+🧹 <b>اسکنِ تازه، نتیجهٔ قبلی را پاک می‌کند:</b> با هر اسکن، گروه‌های تکراری و تیک‌های «رسیدگی»
+و وضعیتِ «قبلاً فرستاده شده» و صفِ گروهِ چک از <b>صفرِ همان اسکن</b> شمرده می‌شود (انگار از نو
+اسکن زده‌اید). ✔ آرشیوِ فایل‌ها و هش‌ها <b>می‌ماند</b> تا اسکنِ تازه سریع باشد — و در تلگرام
+هیچ‌چیز پاک یا ویرایش نمی‌شود.
+
+✔ <b>تیکِ رسیدگی در فهرست:</b> در «🔁 گروه‌های تکراری» کنارِ هر ردیف وضعیتش دیده می‌شود:
+«✔ رسیدگی‌شده» · «🔒 نادیده» · «—» (بی‌تصمیم) — با دکمهٔ «✔ رسیدگی شد» همان‌جا ثبت می‌شود.
 
 👥 <b>ادمین‌های ربات:</b> مالک می‌تواند چند نفر را ادمین کند تا با ربات کار کنند
 (اسکن، دیدنِ نتیجه، فوروارد). «👥 ادمین‌های ربات» ← «➕ افزودنِ ادمین» و فرستادنِ <b>شناسهٔ عددی</b>
@@ -126,6 +147,27 @@ SETTING_INFO: Dict[str, Dict[str, Any]] = {
                     ("12", "۱۲ فایل (پیش‌فرض)", "تعادل"),
                     ("25", "۲۵ فایل", "وقتی می‌خواهید همه را یک‌جا ببینید")],
         "tip": "این سقف جلوی اسپم‌شدنِ چت را می‌گیرد؛ بقیهٔ فایل‌ها در گزارشِ گروه با لینک در دسترس‌اند.",
+    },
+    "check_target": {
+        "icon": "📤", "title": "گروهِ چک (مقصدِ ارسال)",
+        "what": "تکراری‌ها را کجا بفرستم تا خودتان چک کنید: یک <b>گروه/کانالِ خودتان</b>. "
+                "ربات باید در آن مقصد عضو یا ادمین باشد. تعیینِ مقصد دو راه دارد: یک پیامِ "
+                "همان گروه/کانال را برای ربات <b>فوروارد</b> کنید، یا اینجا <code>@یوزرنیم</code> / "
+                "<code>-100…</code> را تایپ کنید.",
+        "presets": [("@my_check_channel", "با یوزرنیم", "مثال: <code>@my_check_channel</code>"),
+                    ("-1001234567890", "با شناسهٔ عددی", "برای گروه‌های بدونِ یوزرنیم")],
+        "tip": "این بخش <b>هیچ‌وقت خودکار نمی‌فرستد</b>: بعد از هر اسکن، خودتان دکمهٔ "
+               "«📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست» را می‌زنید و ربات <b>بدونِ سقفِ تعداد</b> "
+               "هر چه پیدا شده را می‌فرستد.",
+    },
+    "check_albums": {
+        "icon": "📎", "title": "تکراری‌ها کنارِ هم (آلبوم)",
+        "what": "فایل‌های یک گروهِ تکراری در گروهِ چک <b>کنارِ هم</b> (یک آلبوم) فرستاده شوند یا تک‌به‌تک؟ "
+                "آلبوم برای چک‌کردن راحت‌تر است؛ تک‌به‌تک وقتی مقصد آلبوم را محدود می‌کند.",
+        "options": [("1", "کنارِ هم (پیش‌فرض)", "هر گروه = یک سرتیتر + آلبوم‌های کنارِهم"),
+                    ("0", "تک‌به‌تک", "بدونِ آلبوم — پشتِ سرِ هم")],
+        "tip": "این گزینه فقط روی «گروهِ چک» اثر دارد؛ فورواردِ گروه در چتِ خودتان همیشه تک‌به‌تک "
+               "و بدونِ سقف است.",
     },
     "th_name_ratio": {
         "icon": "🎯", "title": "حساسیتِ نامِ فایل",
@@ -228,6 +270,7 @@ SETTING_GROUPS: List[Tuple[str, Tuple[str, ...]]] = [
     ("🧩 گروه‌بندی", ("cluster_mode",)),
     ("📥 اسکن و ایندکس", ("media_kinds", "incr_tail", "prune_missing")),
     ("📎 فوروارد به چتِ شما", ("max_forward_per_group",)),
+    ("📤 گروهِ چک (ارسال با دکمه، بدونِ سقف)", ("check_target", "check_albums")),
 ]
 
 # برچسبِ کوتاهِ هر کلید = عنوانِ همان توضیح (برای `/set` و دکمه‌ها)
@@ -614,6 +657,11 @@ class BotApp:
                 return
             await self._login_phone_got(chat, str(contact["phone_number"]), m)
             return
+        # 📤 حالتِ انتظارِ «تعیینِ مقصدِ گروهِ چک با فوروارد»: خودِ پیامِ فورواردشده آدرس را می‌دهد
+        p_ck = self.pending.get(chat)
+        if p_ck and p_ck.get("kind") == "check_target_fwd" and self._forwarded_chat(m):
+            await self._check_target_from_forward(chat, m)
+            return
         # حالتِ انتظارِ «افزودنِ ادمین»: هم متن و هم پیامِ فورواردشده پذیرفته می‌شود
         p_adm = self.pending.get(chat)
         if p_adm and p_adm.get("kind") == "admin_add" and (self.owner_id and int(uid) == int(self.owner_id)):
@@ -640,6 +688,9 @@ class BotApp:
                 return
             if p["kind"] == "chan_title":
                 await self._set_channel_name(chat, int(p.get("cid") or 0), text)
+                return
+            if p["kind"] == "check_target":                 # 📤 مقصدِ «گروهِ چک» با تایپ
+                await self._apply_setting(chat, "check_target", text)
                 return
             if p["kind"].startswith("login_"):
                 await self._login_step(chat, p, text, m)
@@ -695,6 +746,8 @@ class BotApp:
                      "حسابِ کاربری: %s" % ("✅ وصل" if getattr(self.user, "ready", False) else "❌ وصل نیست"),
                      "اسکنِ جاری: %s" % ("⏳ بله" if (self.scan and not self.scan.get("done")) else "—")]
             await self.api.send_message(chat, "\n".join(lines))
+        elif cmd in ("check", "checkgroup", "mirror"):
+            await self._check_menu(chat)
         elif cmd in ("settings", "st", "config"):
             if _squash(arg).startswith("guide") or "راهنما" in arg or "توضیح" in arg:
                 await self._settings_guide(chat)
@@ -746,6 +799,7 @@ class BotApp:
                 [R.btn("🔑 اتصالِ حسابِ کاربری", "acc:menu"), R.btn("⚙️ تنظیمات", "st:menu")]]
         if self.owner_id and int(uid) == int(self.owner_id):
             rows.append([R.btn("👥 ادمین‌های ربات (%d)" % len(self.admin_ids), "own:menu")])
+        rows.append([R.btn("📤 گروهِ چک (فرستادنِ تکراری‌ها برای بازبینی)", "ck:menu")])
         rows.append([R.btn("❓ راهنما", "help")])
         if self.scan and not self.scan.get("done"):
             rows.insert(0, [R.btn("⏹ توقف و کنسل", "scan:cancel")])
@@ -1238,6 +1292,7 @@ class BotApp:
                                              self._setting_display(k)), "st:%s" % k))
             for i in range(0, len(pairs), 2):
                 rows.append([R.btn(t, c) for t, c in pairs[i:i + 2]])
+        rows.append([R.btn("📤 مقصدِ گروهِ چک (تعیین/تست/برداشتن)", "ck:menu")])
         rows.append([R.btn("❓ هر گزینه یعنی چه؟ (راهنمای کامل)", "st:guide")])
         rows.append([R.btn("♻️ بازگشتِ همه به پیش‌فرض", "st:reset"), R.btn("🏠 منوی اصلی", "home")])
         return rows
@@ -1383,6 +1438,151 @@ class BotApp:
         """ارقامِ فارسی/عربی و جداکنندهٔ اعشارِ فارسی ⇒ ASCII (تا «۰.۶» هم کار کند)."""
         return str(value or "").strip().translate(_DIGITS).replace("٫", ".").replace("،", ",").lower()
 
+    # ═════════════════════ 📤 گروهِ چک (DK-15) ═════════════════════
+    @staticmethod
+    def _parse_check_target(raw: str) -> Tuple[str, str]:
+        """ورودیِ مقصدِ «گروهِ چک» را به شکلِ قابلِ‌استفاده تبدیل می‌کند.
+
+        خروجی: (مقدارِ آمادهٔ ذخیره، متنِ خطا). مقدارِ خالی/«خاموش» یعنی **برداشتنِ مقصد**.
+        پذیرفته‌ها: `@username` · `username` · لینکِ `t.me/…` · شناسهٔ عددی `-100…` (گروه/کانال).
+        """
+        v = str(raw or "").strip()
+        sq = _squash(v)
+        if not v or sq in {"-", "off", "خاموش", "بدون", "هیچ", "بدونمقصد", "پاک", "حذف",
+                           "none", "null", "0", "برداشتن", "پاککن"}:
+            return "", ""
+        m = re.search(r"(?:t\.me|telegram\.me)/(?:c/)?([A-Za-z0-9_]+)", v)
+        if m:
+            slug = m.group(1)
+            if re.fullmatch(r"\d{6,}", slug):                        # لینکِ t.me/c/<id>/<msg>
+                return "-100" + slug, ""
+            return "@" + slug, ""
+        if re.fullmatch(r"@?[A-Za-z0-9_]{4,}", v) and not v.lstrip("@").isdigit():
+            return "@" + v.lstrip("@"), ""                           # یوزرنیم (با یا بدونِ @)
+        if re.fullmatch(r"-100\d{6,}", v):
+            return v, ""                                             # شناسهٔ عددیِ گروه/کانال
+        if re.fullmatch(r"-\d{6,}", v) and len(v) <= 14:
+            return v, ""
+        return "", ("❌ این مقصد خوانده نشد. یکی از این‌ها را بفرستید:\n"
+                    "• <code>@username</code> کانال/گروه (مثال: <code>@my_check</code>)\n"
+                    "• شناسهٔ عددیِ منفی (مثلِ <code>-1001234567890</code>) — از «ℹ️ شناسهٔ خودم» یا "
+                    "از فورواردِ یک پیامِ همان مقصد\n"
+                    "• یا برای خالی‌کردنِ مقصد بنویسید <code>خاموش</code>")
+
+    def _check_target(self) -> str:
+        """مقصدِ فعلیِ «گروهِ چک» (خالی = تعیین نشده)."""
+        return str(getattr(self.settings, "check_target", "") or "").strip()
+
+    def _check_title(self) -> str:
+        """نامِ خوانای مقصد (اگر از فورواردِ پیام گرفته شده باشد)."""
+        return str(self.db.kv_get("check:title") or "").strip()
+
+    def _check_dest_line(self) -> str:
+        tgt = self._check_target()
+        if not tgt:
+            return "مقصد: <b>تعیین نشده</b> ⚠️"
+        title = self._check_title()
+        return "مقصد: <b>%s</b> <code>%s</code>" % (esc(title or tgt), esc(tgt))
+
+    async def _set_check_target(self, chat: int, target: str, title: str = "") -> None:
+        """ذخیرهٔ مقصدِ چک (در تنظیمات + kv) و نمایشِ تأیید."""
+        self.settings.check_target = str(target or "")
+        self.db.kv_set("setting:check_target", str(target or ""))
+        if title:
+            self.db.kv_set("check:title", str(title))
+        elif not target:
+            self.db.kv_set("check:title", "")
+        if not target:
+            await self.api.send_message(
+                chat, "🚫 مقصدِ «گروهِ چک» برداشته شد — تا مقصدِ تازه تعیین نکنید، ارسال انجام نمی‌شود.",
+                kb=R.kb([[R.btn("📤 گروهِ چک", "ck:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+            return
+        await self.api.send_message(
+            chat, "✅ مقصدِ «گروهِ چک» ذخیره شد: %s\n\n"
+                  "<i>یادآوری: ربات هرگز خودکار به مقصد نمی‌فرستد؛ بعد از هر اسکن، دکمهٔ "
+                  "«📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست» را می‌زنید.</i>" % self._check_dest_line(),
+            kb=R.kb([[R.btn("🧪 تستِ دسترسی به مقصد", "ck:test")],
+                     [R.btn("📤 گروهِ چک", "ck:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+
+    async def _check_menu(self, chat: int, *, edit: Optional[int] = None, note: str = "") -> None:
+        """صفحهٔ «گروهِ چک»: تعیینِ مقصد از دو راه + تست + توضیحِ رفتارِ دکمه‌ای."""
+        tgt = self._check_target()
+        lines = []
+        if note:
+            lines += [note, ""]
+        lines += ["📤 <b>گروهِ چک — فرستادنِ تکراری‌ها برای بازبینی</b>", "",
+                  "کارِ این بخش: هر چیزی که ربات <b>تکراری</b> پیدا کرد، با یک دکمه به یک "
+                  "<b>گروه یا کانالِ خودتان</b> فرستاده می‌شود تا آنجا چک کنید.",
+                  "• هر گروهِ تکراری = یک <b>سرتیتر</b> + فایل‌هایش <b>کنارِ هم</b> (تکراری‌ها کنارِ اصلی)",
+                  "• <b>بدونِ سقفِ تعداد</b> — هرچه پیدا شده، همه می‌رود (مثلِ ربات‌های محدودشده نیست)",
+                  "• <b>هیچ‌وقت خودکار نمی‌فرستد</b> — فقط با دکمهٔ «📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست»",
+                  "", self._check_dest_line()]
+        if tgt:
+            lines += ["", "<i>اگر ارسال نشد، ربات را در آن گروه/کانال <b>ادمین</b> کنید "
+                          "(یا حسابِ کاربری را وصل کنید).</i>"]
+        rows: List[List[Dict[str, str]]] = [[R.btn("📌 تعیینِ مقصد با فورواردِ یک پیام", "ck:set:forward")],
+                                            [R.btn("✏️ تعیین با یوزرنیم/شناسهٔ عددی", "ck:set:id")]]
+        if tgt:
+            rows.append([R.btn("🧪 تستِ دسترسی به مقصد", "ck:test"),
+                         R.btn("🚫 برداشتنِ مقصد", "ck:clear")])
+        rows.append([R.btn("⚙️ تنظیمات", "st:menu"), R.btn("🏠 منوی اصلی", "home")])
+        txt = "\n".join(lines)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
+        else:
+            await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+    async def _check_test(self, chat: int) -> None:
+        """🧪 تستِ دسترسی: آیا ربات می‌تواند مقصد را ببیند و در آن بنویسد؟"""
+        tgt = self._check_target()
+        if not tgt:
+            await self._check_menu(chat, note="⚠️ اول مقصد را تعیین کنید.")
+            return
+        title, err = "", ""
+        try:
+            info = await self.api.get_chat(tgt)
+            title = str((info or {}).get("title") or (info or {}).get("username") or "")
+        except Exception as e:
+            err = str(e)
+        if err:
+            await self.api.send_message(
+                chat, "⛔️ ربات به مقصد <code>%s</code> دسترسی ندارد.\n\n<b>راهِ‌حل‌ها:</b>\n"
+                      "① ربات را در آن گروه/کانال <b>ادمین</b> کنید (یا حداقل عضو باشد).\n"
+                      "② یا «🔑 اتصالِ حسابِ کاربری» کنید تا ارسال با حسابِ خودتان انجام شود.\n"
+                      "③ اگر مقصد تنگ‌دست است، اجازهٔ «ارسالِ پیام» را برای ربات باز کنید.\n"
+                      "<i>متنِ خطای تلگرام: %s</i>" % (esc(tgt), esc(err)),
+                kb=R.kb([[R.btn("📌 تعیین با فورواردِ پیام", "ck:set:forward")],
+                         [R.btn("📤 گروهِ چک", "ck:menu")]]))
+            return
+        if title:
+            self.db.kv_set("check:title", title)
+        await self.api.send_message(
+            chat, "✅ دسترسی به مقصد برقرار است: <b>%s</b>\n%s\n\n"
+                  "<i>حالا هر وقت اسکنی تمام شد، دکمهٔ «📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست» "
+                  "را بزنید.</i>" % (esc(title or tgt), self._check_dest_line()),
+            kb=R.kb([[R.btn("📤 گروهِ چک", "ck:menu")], [R.btn("🏠 منوی اصلی", "home")]]))
+
+    async def _check_target_from_forward(self, chat: int, m: Dict[str, Any]) -> bool:
+        """📌 تعیینِ مقصد با **فورواردِ یک پیام** از آن گروه/کانال (خواستهٔ کاربر: هر دو راه)."""
+        chat_obj = ((m.get("forward_origin") or {}).get("chat")
+                    or (m.get("forward_origin") or {}).get("sender_chat")
+                    or m.get("forward_from_chat") or {})
+        cid = chat_obj.get("id")
+        if not cid:
+            await self.api.send_message(
+                chat, "❌ در این پیام آدرسِ گروه/کانال نبود. یک <b>پیامِ همان مقصد</b> را برایم "
+                      "<b>فوروارد</b> کنید (پیامِ فورواردشده از کاربرِ عادی آدرس ندارد).\n\n"
+                      "<i>اگر گروه/کانال خصوصی است، همین راه دقیق‌ترین راه است.</i>",
+                kb=R.kb([[R.btn("✏️ تعیین با یوزرنیم/شناسه", "ck:set:id")],
+                         [R.btn("📤 گروهِ چک", "ck:menu")]]))
+            return False
+        title = str(chat_obj.get("title") or chat_obj.get("username") or "")
+        uname = str(chat_obj.get("username") or "")
+        target = "@" + uname if uname else str(cid)
+        self.pending.pop(chat, None)
+        await self._set_check_target(chat, target, title)
+        return True
+
     async def _invalid_setting(self, chat: int, key: str, *, keep: bool = True) -> None:
         """مقدارِ نامعتبر: پیامِ روشن + **حفظِ حالتِ انتظار** تا مقدارِ درستِ بعدی گم نشود."""
         if keep:
@@ -1428,6 +1628,15 @@ class BotApp:
             if v2 is None:
                 await self._invalid_setting(chat, key)
                 return False
+        elif key == "check_target":
+            v2, err = self._parse_check_target(value)
+            if err:
+                await self.api.send_message(
+                    chat, err,
+                    kb=R.kb([[R.btn("⬅️ همین گزینه", "st:%s" % key)],
+                             [R.btn("📤 گروهِ چک", "ck:menu")]]))
+                self.pending[chat] = {"kind": "setting", "key": key}
+                return False
         elif isinstance(cur, bool):
             if v in _TRUE_WORDS:
                 v2 = True
@@ -1466,6 +1675,8 @@ class BotApp:
         self.pending.pop(chat, None)
         setattr(self.settings, key, v2)
         self.db.kv_set("setting:" + key, v2)
+        if key == "check_target" and not str(v2 or "").strip():
+            self.db.kv_set("check:title", "")               # مقصد برداشته شد ⇒ نامش هم می‌رود
         if silent:
             return True
         info = self._setting_info(key)
@@ -1947,13 +2158,16 @@ class BotApp:
         }
         head = {"done": "✅ اسکن تمام شد", "canceled": "⏹ اسکن کنسل شد", "error": "⚠️ خطا در اسکن"}.get(res.status, res.status)
         self._store_notes(scan, getattr(res, "notes", None))
+        scan = self.db.get_scan(res.scan_id) or scan      # 🩹 یادداشت‌های تازه هم در همین گزارش بیایند
         txt = "%s\n\n%s" % (head, R.scan_summary_text(scan, c, counts,
                                                        total_indexed=self.db.count_files(int(c["id"])),
                                                        notes=self._scan_notes(scan)))
         rows = []
         if res.groups:
             rows.append([R.btn("🔁 دیدنِ %d گروهِ تکراری" % res.groups, "l:%d:%d:all:0" % (res.scan_id, res.channel_id))])
-            rows.append([R.btn("📤 فورواردِ همهٔ تکراری‌ها", "fa:%d:%d:all:0" % (res.scan_id, res.channel_id))])
+            rows.append([R.btn("📤 فورواردِ همهٔ تکراری‌ها (به همین چت)", "fa:%d:%d:all:0" % (res.scan_id, res.channel_id))])
+            rows.append([R.btn("📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست",
+                               "cs:%d:%d" % (res.scan_id, res.channel_id))])
         rows.append([R.btn("🔍 اسکن مجدد", "scan:full:%d" % res.channel_id), R.btn("📡 کانال", "c:%d" % res.channel_id)])
         rows.append([R.btn("🏠 منوی اصلی", "home")])
         try:
@@ -2056,6 +2270,8 @@ class BotApp:
             return
         scan_id = self.db.create_scan(cid, {"mode": "preview", "pages": pages,
                                             "media_kinds": cfg.get("media_kinds")})
+        # 🧹 DK-15: مثلِ اسکنِ کامل، نتایجِ اسکن‌های قبلیِ این کانال پاک می‌شود
+        reset_prev = self.db.reset_results(cid, keep_scan_id=int(scan_id or 0))
         self.db.upsert_files(_with_norms(lst))
         # باگِ گزارش‌شده: قبلاً `find_clusters` روی **همهٔ** فایل‌های ذخیره‌شدهٔ کانال اجرا می‌شد،
         # پس خروجی می‌توانست گروه‌هایی باشد که هیچ ربطی به صفحاتِ تازهٔ پیش‌نمایش ندارند (و
@@ -2069,7 +2285,12 @@ class BotApp:
         clusters = [cl for cl in clusters
                     if any(int(fid) in {int(all_files[i]["id"]) for i in win_idx} for fid in cl["ids"])]
         self.db.replace_groups(scan_id, cid, clusters)
-        note = ("این «اسکنِ محدود» است: فقط %s صفحهٔ آخرِ کانالِ عمومی (پست‌های تازه) و فقط بر پایهٔ "
+        if reset_prev.get("groups"):
+            note_prev = ("🧹 نتایجِ اسکنِ قبلی پاک شد (%s گروه) — فهرست از صفرِ همین اسکن است. "
+                         % reset_prev.get("groups"))
+        else:
+            note_prev = ""
+        note = note_prev + ("این «اسکنِ محدود» است: فقط %s صفحهٔ آخرِ کانالِ عمومی (پست‌های تازه) و فقط بر پایهٔ "
                 "کپشن/نام — حجم و هش در دسترسِ تلگرام نیست و **فورواردِ فایل ممکن نیست** "
                 "(از «🔗 لینکِ پیام‌ها» استفاده کنید). هر گروه دستِ‌کم یک پستِ تازه دارد. "
                 "برای نتیجهٔ کامل، حسابِ کاربری را وصل کنید." % pages)
@@ -2137,7 +2358,8 @@ class BotApp:
         txt = R.scan_summary_text(scan, c, counts, total_indexed=self.db.count_files(cid),
                                   notes=self._scan_notes(scan))
         rows = [[R.btn("🔁 دیدنِ گروه‌ها", "l:%d:%d:all:0" % (scan_id, cid))],
-                [R.btn("📤 فورواردِ همهٔ تکراری‌ها", "fa:%d:%d:all:0" % (scan_id, cid))],
+                [R.btn("📤 فورواردِ همهٔ تکراری‌ها (به همین چت)", "fa:%d:%d:all:0" % (scan_id, cid))],
+                [R.btn("📤 همهٔ تکراری‌های اسکن را به گروهِ چک بفرست", "cs:%d:%d" % (scan_id, cid))],
                 [R.btn("🔍 اسکن مجدد", "scan:full:%d" % cid), R.btn("📡 کانال", "c:%d" % cid)]]
         if edit:
             await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
@@ -2188,6 +2410,12 @@ class BotApp:
 
     async def _forward_group(self, chat: int, scan_id: int, cid: int, filt: str, page: int, gid: int,
                              offset: int = 0) -> None:
+        """📎 فورواردِ **همهٔ** فایل‌های یک گروه تکراری در چتِ خودِ کاربر — تک‌تک و بدونِ سقف.
+
+        خواستهٔ کاربر (DK-15): «وقتی رفتم تو یک دکمه و تکراری نشانم می‌دهد، یک دکمه باشد
+        همه‌جا برایم فوروارد کند — فقط تکراری‌های همان گروه، خودش تا آخر».
+        پس نه سقفی هست و نه دکمهٔ «📎 ادامه»: یک بار می‌زنید، ربات تا آخر می‌رود.
+        """
         g = self.db.get_group(gid)
         c = self.db.get_channel(cid)
         if not g or not c:
@@ -2201,25 +2429,40 @@ class BotApp:
                 "① «🔗 لینکِ پیام‌ها» را بزنید و در کانال ببینید، یا\n"
                 "② «🔑 اتصالِ حسابِ کاربری» و بعد «🔍 اسکن کامل» ⇒ فورواردِ تک‌کلیکی.")
             return
-        members = self.db.group_members(gid)
+        members = [m for m in self.db.group_members(gid) if str(m.get("state") or "") != "ignored"]
+        if not members:
+            await self.api.send_message(chat, "ℹ️ فایلی برای فوروارد در این گروه نمانده.")
+            return
         await self.api.send_chat_action(chat, "upload_document")
-        res = await self.reporter.forward_group(chat, c, members, offset=offset)
-        self.db.log_action("forward", "group=%s sent=%s" % (gid, res["sent"]))
-        lines = ["📎 <b>فورواردِ گروه #%s</b>" % gid,
-                 "فرستاده‌شده: <b>%s</b> از <b>%s</b>" % (res["sent"], res["total"])]
+        res = await self.reporter.forward_each(chat, c, members)          # بدونِ سقف، تک‌به‌تک
+        self.db.log_action("forward", "group=%s sent=%s total=%s" % (gid, res["sent"], res["total"]))
+        links = int(res.get("links") or 0)
+        lines = ["📎 <b>فورواردِ گروهِ #%s</b> (تک‌به‌تک، بدونِ سقف)" % gid,
+                 "فرستاده‌شده: <b>%s</b> از <b>%s</b>%s" % (
+                     res["sent"], res["total"],
+                     ("  ·  🔗 فقط لینک: <b>%d</b>" % links) if links else "")]
         if res["failed"]:
-            lines.append("⚠️ ناموفق: <code>%s</code> (محتوا محافظت‌شده یا حذف‌شده — لینک‌ها را از دکمهٔ «🔗 لینکِ پیام‌ها» بگیرید)" % (
-                ",".join(str(x) for x in res["failed"])))
-        if res["remaining"]:
-            lines.append("🕘 <b>%d</b> فایلِ دیگر مانده — دکمهٔ ادامه را بزنید." % res["remaining"])
+            lines.append("⚠️ ناموفق: <code>%s</code> (محتوا محافظت‌شده یا حذف‌شده — لینک‌ها را از "
+                         "دکمهٔ «🔗 لینکِ پیام‌ها» بگیرید)" % ",".join(str(x) for x in res["failed"][:25]))
+        if links and not res["sent"]:
+            lines += ["", "⚠️ <b>ربات اجازهٔ فورواردِ خودِ فایل را نداشت</b> (کانال محافظت‌شده یا "
+                          "ربات دسترسی ندارد) — به‌جای فایل، <b>لینکِ پست‌ها</b> فرستاده شد.\n"
+                          "<i>برای فورواردِ خودِ فایل: «🔑 اتصالِ حسابِ کاربری» یا ربات را ادمین کنید.</i>"]
+        elif res["sent"]:
+            lines.append("✅ فایل‌های این گروه به همین چت آمد؛ با کلیک روی هر پیام، همان پستِ کانال "
+                         "باز می‌شود. ربات هیچ‌چیز را پاک نمی‌کند — تصمیم با شماست.")
         else:
-            lines.append("✅ همهٔ فایل‌های این گروه فرستاده شد. با کلیک روی هر پیام، همان پستِ کانال باز می‌شود.")
-        rows = []
-        if res["remaining"]:
-            rows.append([R.btn("📎 ادامه (%d فایلِ بعدی)" % min(self.reporter.max_per_group, res["remaining"]),
-                               "f2:%d:%d:%s:%d:%d:%d" % (scan_id, cid, filt, page, gid, res["offset"]))])
-        rows.append([R.btn("🔗 لینکِ پیام‌ها", "u:%d:%d:%d" % (scan_id, cid, gid)),
-                     R.btn("⬅️ گروه", "g:%d:%d:%s:%d:%d" % (scan_id, cid, filt, page, gid))])
+            lines += ["", "⛔️ <b>هیچ‌کدام از فایل‌های این گروه فرستاده نشد.</b>\n"
+                          "دلیل‌های رایج: ① محتوای کانال محافظت‌شده (نوفوروارد) است "
+                          "② فایل‌ها در کانال حذف شده‌اند ③ برای این کانال نه ربات دسترسی دارد و نه "
+                          "حسابِ کاربری وصل است.\n"
+                          "<i>راهِ‌حل: «🔑 اتصالِ حسابِ کاربری» را بزنید، یا از «🔗 لینکِ پیام‌ها» "
+                          "استفاده کنید. اگر فایل‌ها حذف شده‌اند، فقط همین لینک‌ها می‌مانند.</i>"]
+        rows = [[R.btn("🔗 لینکِ پیام‌ها", "u:%d:%d:%d" % (scan_id, cid, gid)),
+                 R.btn("⬅️ گروه", "g:%d:%d:%s:%d:%d" % (scan_id, cid, filt, page, gid))]]
+        if res["sent"] < res["total"] or not res["sent"]:
+            rows.insert(0, [R.btn("🔁 یک‌بار دیگر امتحان کن",
+                                  "f:%d:%d:%s:%d:%d" % (scan_id, cid, filt, page, gid))])
         await self.api.send_message(chat, "\n".join(lines), kb=R.kb(rows))
 
     async def _forward_all(self, chat: int, scan_id: int, cid: int, filt: str, offset: int,
@@ -2336,6 +2579,311 @@ class BotApp:
             await self.api.edit_message_text(chat, edit, txt, kb=R.kb(rows))
         else:
             await self.api.send_message(chat, txt, kb=R.kb(rows))
+
+
+    # ═════════════════════ 📤 گروهِ چک — ارسالِ دستیِ همهٔ تکراری‌ها (DK-15) ═════════════════════
+    @staticmethod
+    def _chunks(seq: Sequence[Any], n: int) -> List[List[Any]]:
+        return [list(seq[i:i + n]) for i in range(0, len(seq), max(1, int(n)))]
+
+    def _check_albums_on(self) -> bool:
+        return bool(getattr(self.settings, "check_albums", True))
+
+    def _check_scan_cid(self, scan_id: int) -> int:
+        """شناسهٔ کانالِ داخلیِ یک اسکن (از وضعیتِ صف، وگرنه از خودِ اسکن)."""
+        st = self.db.kv_get("checkq:%d" % int(scan_id)) or {}
+        cid = int((st or {}).get("cid") or 0)
+        if cid:
+            return cid
+        sc = self.db.get_scan(int(scan_id)) or {}
+        return int(sc.get("channel_id") or 0)
+
+    def _mir_flag(self, scan_id: int, gid: int) -> bool:
+        """آیا این گروه قبلاً به گروهِ چک فرستاده شده؟ (جلوگیری از تکرارِ ناخواسته)"""
+        return bool(self.db.kv_get("mir:%d:%d" % (int(scan_id), int(gid))))
+
+    async def _check_album(self, tgt: Any, c: Dict[str, Any], ids: Sequence[int]) -> bool:
+        """ارسالِ یک آلبوم (تا ۱۰ فایل) به مقصد — برای «تکراری‌ها کنارِ هم»."""
+        fn = getattr(self.api, "send_media_group", None)
+        if fn is None or len(list(ids)) < 2:
+            return False
+        try:
+            await fn(tgt, int(c.get("tg_id") or 0), [int(x) for x in ids])
+            return True
+        except Exception as e:
+            log.info("آلبومِ گروهِ چک ناموفق بود (%s): %s", tgt, e)
+            return False
+
+    def _check_blocked_note(self) -> str:
+        """توضیحِ روشنِ «چرا ارسال قطع شد» — خواستهٔ کاربر: شکستِ خاموش نداشته باشیم."""
+        return ("⛔️ <b>هیچ فایلی به مقصد نرسید — ارسال قطع است.</b>\n\n"
+                "<b>دلیل‌های رایج:</b>\n"
+                "① ربات در آن گروه/کانال <b>عضو یا ادمین نیست</b> (یا اجازهٔ ارسال ندارد).\n"
+                "② مقصد «فقط ادمین‌ها می‌توانند بنویسند» است.\n"
+                "③ محتوای کانال <b>محافظت‌شده</b> (نوفوروارد) است ⇒ فقط با حسابِ کاربری می‌رود.\n"
+                "④ فایل‌ها در کانال <b>حذف</b> شده‌اند.\n\n"
+                "<b>چه کار کنم؟</b> «🧪 تستِ دسترسی به مقصد» را بزنید؛ اگر گفت دسترسی نیست، "
+                "ربات را در آن مقصد <b>ادمین</b> کنید یا «🔑 اتصالِ حسابِ کاربری» بزنید.")
+
+    def _check_keyboard(self, scan_id: int, cid: int, *, running: bool = False) -> Dict[str, Any]:
+        """دکمه‌های همیشگیِ صفحهٔ گروهِ چک: ⏹ توقف/▶️ ادامه · 📊 وضعیت · ✔ رسیدگی · 🔁 از نو."""
+        rows: List[List[Dict[str, str]]] = []
+        if running:
+            rows.append([R.btn("⏹ توقفِ ارسال", "qs:stop:%d" % scan_id)])
+        else:
+            rows.append([R.btn("▶️ ادامهٔ ارسال (باقی‌مانده‌ها)", "qs:resume:%d:%d" % (scan_id, cid)),
+                         R.btn("🔁 همه را از نو بفرست", "qs:again:%d:%d" % (scan_id, cid))])
+        rows.append([R.btn("📊 وضعیتِ ارسال", "qs:state:%d" % scan_id),
+                     R.btn("✔ همهٔ گروه‌ها رسیدگی‌شده", "qs:alldone:%d" % scan_id)])
+        rows.append([R.btn("🔁 گروه‌های تکراری", "l:%d:%d:all:0" % (scan_id, cid)),
+                     R.btn("🏠 منوی اصلی", "home")])
+        return R.kb(rows)
+
+    async def _check_state_msg(self, chat: int, scan_id: int, cid: int, *, edit: Optional[int] = None) -> None:
+        """📊 وضعیتِ ارسال به گروهِ چک: چند گروه رفت، چند مانده، چند ناموفق."""
+        st = dict(self.db.kv_get("checkq:%d" % scan_id) or {})
+        groups = self.db.groups_of_scan(scan_id)
+        active = [g for g in groups if str(g.get("state") or "open") != "ignored"]
+        done = [g for g in active if self._mir_flag(scan_id, int(g["id"]))]
+        left = [g for g in active if not self._mir_flag(scan_id, int(g["id"]))]
+        skipped = [g for g in active if self.db.kv_get("checkq:skip:%d:%d" % (scan_id, int(g["id"])))]
+        files_done = sum(len([m for m in self.db.group_members(int(g["id"]))
+                              if str(m.get("state") or "") != "ignored"]) for g in done)
+        lines = ["📊 <b>وضعیتِ فرستادن به گروهِ چک</b>", "", self._check_dest_line(),
+                 "گروه‌های این اسکن: <b>%d</b> (نادیده‌گرفته‌ها حساب نمی‌شوند)" % len(active),
+                 "✅ فرستاده‌شده: <b>%d</b> گروه · <b>%d</b> فایل" % (len(done), files_done),
+                 "🕘 باقی‌مانده: <b>%d</b> گروه" % len(left)]
+        if skipped:
+            lines.append("🗑 رد‌شده با دکمهٔ حذفِ جهش: <b>%d</b> گروه" % len(skipped))
+        if st.get("failed"):
+            lines.append("⚠️ ناموفق‌ها: <code>%s</code>" % esc(", ".join(str(x) for x in st["failed"][:20])))
+        if left:
+            lines += ["", "<b>گروه‌های باقی‌مانده:</b> " + ", ".join("#%d" % int(g["id"]) for g in left[:25])
+                      + (" …" if len(left) > 25 else "")]
+        if not self._check_target():
+            lines += ["", "⚠️ مقصد تعیین نشده — اول مقصد را بگذارید."]
+        txt = "\n".join(lines)
+        if edit:
+            await self.api.edit_message_text(chat, edit, txt, kb=self._check_keyboard(scan_id, cid))
+        else:
+            await self.api.send_message(chat, txt, kb=self._check_keyboard(scan_id, cid))
+
+    async def _check_send_all(self, chat: int, scan_id: int, cid: int, *, edit: Optional[int] = None,
+                              only: Optional[Sequence[int]] = None, again: bool = False,
+                              quiet: bool = False) -> None:
+        """📤 ارسالِ **دستی** تک‌تکِ گروه‌های یک اسکن به «گروهِ چک» — بدونِ سقفِ تعداد.
+
+        خواستهٔ کاربر (DK-15): «هر تکراری را کنارِ خودش بفرست تا چک کنم، بدونِ محدودیتِ تعداد».
+        پس: ① فقط با دکمه اجرا می‌شود (هیچ ارسالِ خودکاری وجود ندارد) ② سقفی ندارد
+        ③ هر گروه = یک سرتیتر + فایل‌هایش کنارِ هم ④ اگر هیچ‌کدام نرفت، **هشدارِ روشن** می‌دهد.
+        """
+        c = self.db.get_channel(cid)
+        if not c:
+            return
+        tgt = self._check_target()
+        if not tgt:
+            await self.api.send_message(
+                chat, "📤 <b>گروهِ چک</b>\n\nاول باید <b>مقصد</b> را تعیین کنید: یک گروه یا کانالِ "
+                      "خودتان که ربات در آن ادمین/عضو باشد.\n"
+                      "دو راه دارد: یک پیامِ همان مقصد را برایم <b>فوروارد</b> کنید، یا "
+                      "<code>@یوزرنیم</code> / <code>-100…</code> را تایپ کنید.",
+                kb=R.kb([[R.btn("📌 تعیین با فورواردِ پیام", "ck:set:forward")],
+                         [R.btn("✏️ تعیین با یوزرنیم/شناسه", "ck:set:id")],
+                         [R.btn("📤 گروهِ چک", "ck:menu")]]))
+            return
+        scan = self.db.get_scan(scan_id) or {}
+        if self._scan_is_preview(scan):
+            await self.api.send_message(
+                chat, "⚠️ این گروه‌ها از «اسکنِ محدود» آمده‌اند و ربات در آن حالت به خودِ فایل "
+                      "دسترسی ندارد ⇒ فرستادن به گروهِ چک ممکن نیست.\n"
+                      "① «🔗 لینکِ پیام‌ها» را ببینید، یا ② حسابِ کاربری را وصل کنید و "
+                      "«🔍 اسکن کامل» بزنید.",
+                kb=R.kb([[R.btn("🔁 گروه‌های تکراری", "l:%d:%d:all:0" % (scan_id, cid))],
+                         [R.btn("🏠 منوی اصلی", "home")]]))
+            return
+        st = dict(self.db.kv_get("checkq:%d" % scan_id) or {})
+        if st.get("running"):
+            await self.api.send_message(chat, "⏳ ارسالِ همین اسکن همین حالا در جریان است. "
+                                              "صبر کنید یا «⏹ توقف» را بزنید.")
+            return
+        groups = self.db.groups_of_scan(scan_id)
+        if only:
+            want = {int(x) for x in only}
+            groups = [g for g in groups if int(g["id"]) in want]
+        ignored = [g for g in groups if str(g.get("state") or "open") == "ignored"]
+        active = [g for g in groups if str(g.get("state") or "open") != "ignored"]
+        todo = [g for g in active if again or not self._mir_flag(scan_id, int(g["id"]))]
+        if not todo:
+            await self.api.send_message(
+                chat, "✅ چیزی برای فرستادن نمانده — %s\n\n"
+                      "<i>اگر می‌خواهید همه از نو برود، «🔁 همه را از نو بفرست» را بزنید.</i>"
+                      % ("همهٔ %d گروهِ این اسکن قبلاً فرستاده شده‌اند." % len(active) if active
+                         else "این اسکن گروهِ تکراریِ فعالی ندارد."),
+                kb=self._check_keyboard(scan_id, cid))
+            return
+        head = self._check_channel(c)
+        files_plan = sum(len([m for m in self.db.group_members(int(g["id"]))
+                              if str(m.get("state") or "") != "ignored"]) for g in todo)
+        lines = ["📤 <b>گروهِ چک — ارسالِ دستی</b>", "",
+                 self._check_dest_line(),
+                 "کانال: <b>%s</b>" % esc(head),
+                 "گروه‌های در نوبت: <b>%d</b> · فایل‌ها: <b>%d</b> · <b>بدونِ سقفِ تعداد</b>" % (
+                     len(todo), files_plan)]
+        if ignored:
+            lines.append("🔒 نادیده‌گرفته‌شده‌ها فرستاده نمی‌شوند: <b>%d</b> گروه" % len(ignored))
+        if len(todo) < len(active):
+            lines.append("✅ %d گروهِ دیگر قبلاً فرستاده شده بود (با «🔁 همه را از نو» دوباره می‌رود)."
+                         % (len(active) - len(todo)))
+        lines += ["", "<i>هر گروه = یک سرتیتر + فایل‌هایش کنارِ هم (تکراری‌ها کنارِ اصلی). "
+                      "هر وقت خواستید «⏹ توقف» بزنید.</i>"]
+        kb = self._check_keyboard(scan_id, cid, running=True)
+        if edit:
+            try:
+                await self.api.edit_message_text(chat, edit, "\n".join(lines), kb=kb)
+                msg_id = int(edit)
+            except TgError:
+                msg_id = int((await self.api.send_message(chat, "\n".join(lines), kb=kb)).get("message_id") or 0)
+        else:
+            msg_id = int((await self.api.send_message(chat, "\n".join(lines), kb=kb)).get("message_id") or 0)
+        # دسترسیِ مقصد را از قبل چک می‌کنیم تا «شکستِ خاموش» نداشته باشیم
+        dest_warn = ""
+        try:
+            info = await self.api.get_chat(tgt)
+            title = str((info or {}).get("title") or (info or {}).get("username") or "")
+            if title:
+                self.db.kv_set("check:title", title)
+            dest_warn = ""
+        except Exception as e:
+            dest_warn = ("⚠️ ربات به مقصد <code>%s</code> دسترسی نداشت (%s).\n"
+                         "اگر احرازِ هویت ادمین هست، ادامه می‌دهیم و در پایان نتیجه را می‌گوییم."
+                         % (esc(tgt), esc(str(e)[:80])))
+        self.db.kv_set("checkq:stop:%d" % scan_id, 0)
+        self.db.kv_set("checkq:%d" % scan_id, {"running": 1, "total": len(todo), "sent": 0,
+                                               "failed": [], "skipped": [], "cid": cid})
+        sent_files = 0
+        link_only = 0
+        sent_groups = 0
+        failed: List[int] = []
+        skipped: List[int] = []
+        stopped = False
+        banned = False
+        for gi, g in enumerate(todo):
+            if self.db.kv_get("checkq:stop:%d" % scan_id):
+                stopped = True
+                break
+            gid = int(g["id"])
+            if self.db.kv_get("checkq:skip:%d:%d" % (scan_id, gid)):
+                skipped.append(gid)
+                self.db.kv_set("mir:%d:%d" % (scan_id, gid), 1)      # «رد شد» = دیگر پیشنهاد نشود
+                continue
+            members = sorted([m for m in self.db.group_members(gid)
+                              if str(m.get("state") or "") != "ignored"],
+                             key=lambda m: int(m.get("msg_id") or 0))
+            if not members:
+                skipped.append(gid)
+                continue
+            stars = R.STARS.get(int(g.get("strength") or 0), "★")
+            orig = int(members[0].get("msg_id") or 0)
+            dupes = [int(m.get("msg_id") or 0) for m in members[1:]]
+            # سرتیترِ خوانا: کاربر سریع می‌فهمد این‌ها تکراریِ کدام پستِ کانال‌اند
+            try:
+                await self.api.send_message(
+                    tgt,
+                    "🔸 <b>#%d</b> · %s · <b>%d فایل</b>\n<i>%s</i>\n"
+                    "🆕 اصلی (بماند): <code>%d</code>\n♻️ تکراری‌ها (کنارِ هم): <code>%s</code>"
+                    % (gid, stars, len(members), esc(g.get("reason") or ""), orig,
+                       ", ".join(str(x) for x in dupes[:30]) or "—"),
+                    kb=R.kb([[R.btn("🗑 این گروه را نفرست (بقیه را رد کن)", "qs:skip:%d:%d" % (scan_id, gid))]]))
+            except Exception as e:
+                log.info("سرتیترِ گروهِ چک نرفت (%s): %s", tgt, e)
+            g_sent, g_link, g_failed = 0, 0, []
+            done_ids: set = set()
+            ids = [int(m.get("msg_id") or 0) for m in members]
+            if self._check_albums_on() and len(ids) >= 2:
+                for part in self._chunks(ids, 10):
+                    if len(part) < 2:
+                        continue
+                    if await self._check_album(tgt, c, part):
+                        g_sent += len(part)
+                        done_ids |= set(part)
+            for m in members:
+                mid = int(m.get("msg_id") or 0)
+                if mid in done_ids:
+                    continue
+                kind = await self.reporter._forward_one_kind(tgt, c, mid, m)
+                if kind in ("bot", "user", "copy"):
+                    g_sent += 1
+                elif kind == "link":
+                    g_link += 1                       # فایل نرفت؛ فقط لینک ⇒ در گزارش جدا می‌آید
+                else:
+                    g_failed.append(mid)
+            sent_files += g_sent
+            link_only += g_link
+            failed += g_failed
+            if g_sent:
+                sent_groups += 1
+            self.db.kv_set("mir:%d:%d" % (scan_id, gid), 1 if not g_failed else 0)
+            self.db.log_action("check_send", "scan=%s group=%s sent=%s links=%s failed=%s" % (
+                scan_id, gid, g_sent, g_link, len(g_failed)))
+            self.db.kv_set("checkq:%d" % scan_id, {"running": 1, "total": len(todo), "sent": sent_files,
+                                                   "failed": failed[:200], "skipped": skipped,
+                                                   "cid": cid, "i": gi + 1})
+            if msg_id and (gi % 3 == 0 or gi == len(todo) - 1):
+                try:
+                    await self.api.edit_message_text(
+                        chat, msg_id,
+                        "📤 <b>گروهِ چک — در جریان</b>\n%s\n\n"
+                        "گروه‌ها: <b>%d</b> از <b>%d</b>\nفایل‌های رفته: <b>%d</b>%s\n"
+                        "<i>بدونِ سقف — هرچه مانده ادامه می‌یابد.</i>" % (
+                            self._check_dest_line(), gi + 1, len(todo), sent_files,
+                            ("\n⚠️ ناموفق تا حالا: %d" % len(failed)) if failed else ""),
+                        kb=self._check_keyboard(scan_id, cid, running=True))
+                except TgError:
+                    pass
+            # ⛔ گارد: اگر دو گروهِ اول هیچ‌کدام نرفتند، یعنی ارسال قطع است (باید بفهمیم، نه اینکه خاموش بشکند)
+            if not sent_files and gi >= 1:
+                stopped = True
+                banned = True
+                break
+        self.db.kv_set("checkq:%d" % scan_id, {"running": 0, "total": len(todo), "sent": sent_files,
+                                               "failed": failed[:200], "skipped": skipped, "cid": cid,
+                                               "i": len(todo), "stopped": bool(stopped)})
+        self.db.kv_set("checkq:stop:%d" % scan_id, 0)
+        left = len(todo) - (sent_groups + len(skipped))
+        out = ["%s <b>گروهِ چک</b> — %s" % ("⛔️" if (banned or (not sent_files and todo)) else
+                                            ("⏹" if stopped else "✅"), esc(head)),
+               self._check_dest_line(),
+               "گروه‌های فرستاده‌شده: <b>%d</b> از <b>%d</b> · فایل‌ها: <b>%d</b>%s" % (
+                   sent_groups, len(todo), sent_files,
+                   ("  ·  🔗 فقط لینک: <b>%d</b>" % link_only) if link_only else "")]
+        if link_only and not sent_files:
+            out.append("⚠️ <b>ربات اجازهٔ فورواردِ خودِ فایل را نداشت</b> — به‌جای فایل، لینکِ پست‌ها "
+                       "رفت. برای فایلِ واقعی ربات را در کانال ادمین کنید یا «🔑 اتصالِ حسابِ کاربری» بزنید.")
+        if failed:
+            out.append("⚠️ فایل‌های نرفته: <code>%s</code>%s" % (
+                ", ".join(str(x) for x in failed[:20]), " …" if len(failed) > 20 else ""))
+        if skipped:
+            out.append("🗑 گروه‌های رد‌شده: <code>%s</code>" % ", ".join(str(x) for x in skipped[:20]))
+        if dest_warn:
+            out.append(dest_warn)
+        if banned or (not sent_files and todo):
+            out += ["", self._check_blocked_note()]
+        elif left > 0:
+            out += ["", "🕘 <b>%d</b> گروهِ دیگر مانده — «▶️ ادامهٔ ارسال» را بزنید." % left]
+        else:
+            out += ["", "✅ همهٔ گروه‌های این اسکن به مقصد رفت. حالا آنجا کنارِ هم چک کنید "
+                        "(ربات خودش هیچ‌چیزی پاک نمی‌کند)."]
+        kb = self._check_keyboard(scan_id, cid)
+        if banned or (not sent_files and todo):        # راهِ یک‌کلیکیِ رفعِ مشکل، همان‌جا
+            kb = R.kb([[R.btn("🧪 تستِ دسترسی به مقصد", "ck:test")],
+                       [R.btn("📌 تعیینِ مقصدِ تازه", "ck:set:forward")]] +
+                      list(kb.get("inline_keyboard") or []))
+        try:
+            await self.api.send_message(chat, "\n".join(out), kb=kb)
+        except TgError:
+            pass
+    def _check_channel(self, c: Dict[str, Any]) -> str:
+        return R.channel_title(c)
 
     # ═════════════════════ کال‌بک‌ها ═════════════════════
     async def handle_callback(self, cq: Dict[str, Any]) -> None:
@@ -2552,6 +3100,79 @@ class BotApp:
                 self.db.set_group_state(gid, "done" if state == "done" else "ignored")
                 await self.api.answer_callback(cq_id, "✅ ثبت شد")
                 await self._group_view(chat, scan_id, cid, "all", 0, gid, edit=mid)
+            elif op == "ck":
+                sub = ":".join(parts[1:]) if len(parts) > 1 else "menu"
+                if sub in ("", "menu"):
+                    await self._check_menu(chat, edit=mid)
+                elif sub == "set:forward":
+                    self.pending[chat] = {"kind": "check_target_fwd"}
+                    await self.api.send_message(
+                        chat,
+                        "📌 <b>تعیینِ مقصدِ گروهِ چک با فوروارد</b>\n\nیک <b>پیام از همان "
+                        "گروه/کانال</b> را برایم <b>فوروارد</b> کنید؛ من آدرسش را برمی‌دارم.\n"
+                        "<i>اگر مقصد گروهِ خصوصی است، همین راه بهترین است — ولی ربات باید عضو یا "
+                        "ادمینِ آن گروه باشد.</i>",
+                        kb=R.kb([[R.btn("✏️ به‌جایش یوزرنیم/شناسه می‌فرستم", "ck:set:id")],
+                                 [R.btn("📤 گروهِ چک", "ck:menu")]]))
+                elif sub == "set:id":
+                    self.pending[chat] = {"kind": "setting", "key": "check_target"}
+                    await self.api.send_message(
+                        chat,
+                        "✏️ <b>مقصدِ گروهِ چک را تایپ کنید</b>\n\n"
+                        "• یوزرنیم با <code>@</code> (مثلِ <code>@my_check</code>) یا بدونِ آن\n"
+                        "• شناسهٔ عددیِ گروه/کانال (مثلِ <code>-1001234567890</code>)\n"
+                        "• یا لینکِ <code>t.me/…</code>\n"
+                        "• برای برداشتنِ مقصد بنویسید <code>خاموش</code>",
+                        kb=R.kb([[R.btn("📌 با فورواردِ پیام تعیین کن", "ck:set:forward")],
+                                 [R.btn("📤 گروهِ چک", "ck:menu")]]))
+                elif sub == "test":
+                    await self._check_test(chat)
+                elif sub == "clear":
+                    await self._set_check_target(chat, "", "")
+            elif op == "cs":
+                await self._check_send_all(chat, int(parts[1]), int(parts[2]), edit=mid)
+            elif op == "csrf":
+                scan_id, cid, gid = int(parts[1]), int(parts[2]), int(parts[3])
+                await self._check_send_all(chat, scan_id, cid, only=[gid], again=True)
+            elif op == "qs":
+                sub = parts[1] if len(parts) > 1 else ""
+                if sub == "stop":
+                    self.db.kv_set("checkq:stop:%d" % int(parts[2]), 1)
+                    await self.api.answer_callback(cq_id, "⏹ توقف ثبت شد — تا پایانِ گروهِ جاری")
+                elif sub == "state":
+                    scan_id = int(parts[2])
+                    await self._check_state_msg(chat, scan_id, self._check_scan_cid(scan_id), edit=mid)
+                elif sub == "resume":
+                    scan_id, cid = int(parts[2]), int(parts[3])
+                    await self._check_send_all(chat, scan_id, cid)
+                elif sub == "again":
+                    scan_id, cid = int(parts[2]), int(parts[3])
+                    for g in self.db.groups_of_scan(scan_id):
+                        self.db.kv_set("mir:%d:%d" % (scan_id, int(g["id"])), 0)
+                    await self._check_send_all(chat, scan_id, cid, again=True)
+                elif sub == "alldone":
+                    scan_id = int(parts[2])
+                    n = 0
+                    for g in self.db.groups_of_scan(scan_id):
+                        if str(g.get("state") or "open") == "open":
+                            self.db.set_group_state(int(g["id"]), "done")
+                            n += 1
+                    await self.api.send_message(
+                        chat, "✔ وضعیتِ <b>%d</b> گروه روی «رسیدگی‌شده» گذاشته شد — حالا در "
+                              "<b>فهرستِ گروه‌ها</b> کنارِ هر ردیف «✔ رسیدگی‌شده» می‌بینید.\n"
+                              "<i>این فقط ثبتِ وضعیت در ربات است؛ در تلگرام هیچ‌چیزی عوض نمی‌شود.</i>" % n,
+                        kb=R.kb([[R.btn("🔁 گروه‌های تکراری",
+                                        "l:%d:%d:all:0" % (scan_id, self._check_scan_cid(scan_id)))],
+                                 [R.btn("🏠 منوی اصلی", "home")]]))
+                elif sub == "skip":
+                    scan_id, gid = int(parts[2]), int(parts[3])
+                    self.db.kv_set("checkq:skip:%d:%d" % (scan_id, gid), 1)
+                    await self.api.answer_callback(cq_id, "🗑 ثبت شد — این گروه دیگر فرستاده نمی‌شود")
+                    try:
+                        await self.api.edit_message_reply_markup(chat, mid, kb=R.kb(
+                            [[R.btn("🗑 از ارسال حذف شد", "nop:")]]))
+                    except Exception:
+                        pass
             elif op == "nop":
                 pass
         except Exception as e:

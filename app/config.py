@@ -40,6 +40,8 @@ LABELS: Dict[str, str] = {
     "dur_tol_s": "تلورانسِ زمانِ ویدیو (ثانیه)",
     "min_size_for_match": "حداقل حجم برای مقایسه (بایت)",
     "max_forward_per_group": "حداکثر فوروارد در هر گروه",
+    "check_target": "گروهِ چک: مقصدِ ارسالِ تکراری‌ها (گروه/کانال)",
+    "check_albums": "در گروهِ چک، تکراری‌های هر گروه کنارِ هم (آلبوم) فرستاده شوند",
     "media_kinds": "نوعِ فایل‌های اسکن‌شده",
     "min_duration_s": "حداقل زمانِ ویدیو برای مقایسه (ثانیه)",
     "size_time_require_one_exact": "حالتِ حجم/زمان: یکی دقیقاً برابر باشد",
@@ -101,6 +103,10 @@ class Settings:
     preview_delay: float = field(default_factory=lambda: _env_float("PREVIEW_DELAY", 1.2))
     media_kinds: str = field(default_factory=lambda: _env("MEDIA_KINDS", "video") or "video")        # video|video+doc|all
     max_forward_per_group: int = field(default_factory=lambda: _env_int("MAX_FORWARD_PER_GROUP", 12))
+    # ── 📤 DK-15: «گروهِ چک» — مقصدِ ارسالِ تکراری‌ها برای بازبینیِ کاربر ──
+    # خالی = مقصدی تعیین نشده (بخشِ گروهِ چک خاموش است). می‌تواند `@username` یا `-100…` باشد.
+    check_target: str = field(default_factory=lambda: _env("CHECK_TARGET"))
+    check_albums: bool = field(default_factory=lambda: _env_bool("CHECK_ALBUMS", True))
     progress_interval: float = field(default_factory=lambda: _env_float("PROGRESS_INTERVAL", 2.0))
     scan_wait_time: float = field(default_factory=lambda: _env_float("SCAN_WAIT_TIME", 0.35))
     page_size: int = field(default_factory=lambda: _env_int("PAGE_SIZE", 8))

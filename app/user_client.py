@@ -705,12 +705,37 @@ class UserClient:
                 break
         return bytes(buf[:length])
 
+    @staticmethod
+    def _dest_id(to_chat: Any) -> Any:
+        """مقصدِ فوروارد: شناسهٔ عددی یا `@username` (گروهِ چک ممکن است با یوزرنیم تعیین شود)."""
+        if isinstance(to_chat, str) and not to_chat.strip().lstrip("-").isdigit():
+            return to_chat.strip()
+        return int(to_chat)
+
+    async def forward_one(self, to_chat: int, tg_id: int, msg_id: int, *, group_key: Optional[str] = None) -> bool:
+        """➡️ DK-15: فورواردِ **تک‌تک** یک پیام با حسابِ کاربری.
+
+        خواستهٔ کاربر: «تک‌تک، خودش تا آخر» — پس ارسال‌ها یکی‌یکی و پشتِ‌سرهم می‌روند و
+        `group_key` (مثلاً «g:12» یا «12:34») باعث می‌شود آلبومِ ناقصِ یک گروه با آلبومِ
+        گروهِ دیگر قاطی نشود (تلگرام پیام‌هایی که پشتِ‌سرهم با فاصلهٔ کم بیایند را در یک
+        آلبوم می‌چیند). اگر بشود، همان پیام‌ها به‌صورتِ **آلبوم** هم با `as_album=True`
+        گروه‌بندی می‌شوند تا خروجی تمیز باشد.
+        """
+        try:
+            ent = await self._entity(tg_id)
+            await self.client.forward_messages(self._dest_id(to_chat), [int(msg_id)], ent, as_album=True)
+            self.forwarded.append({"to": to_chat, "from": int(tg_id), "ids": [int(msg_id)]})
+            return True
+        except Exception as e:
+            log.info("فورواردِ تک‌پیامیِ کاربری ناموفق (%s/%s): %s", to_chat, msg_id, e)
+            return False
+
     async def forward(self, to_chat: int, tg_id: int, msg_ids: Sequence[int]) -> bool:
         """فوروارد با **حسابِ کاربری** (فال‌بکِ دوم وقتی ربات اجازه ندارد)."""
         try:
             ent = await self._entity(tg_id)
-            await self.client.forward_messages(int(to_chat), list(msg_ids), ent)
-            self.forwarded.append({"to": int(to_chat), "from": int(tg_id), "ids": [int(x) for x in msg_ids]})
+            await self.client.forward_messages(self._dest_id(to_chat), list(msg_ids), ent)
+            self.forwarded.append({"to": to_chat, "from": int(tg_id), "ids": [int(x) for x in msg_ids]})
             return True
         except Exception as e:
             log.info("فورواردِ کاربری ناموفق: %s", e)

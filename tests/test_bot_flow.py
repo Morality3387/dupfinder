@@ -254,18 +254,12 @@ def test_full_scan_report_forward_and_actions():
         assert "دلیلِ تشخیص" in detail and "t.me/testchan/" in detail and "پیام" in detail
         members = e.db.group_members(gid)
         assert len(members) >= 2
-        # فوروارد
+        # فوروارد — DK-15: «تک‌تک، خودش تا آخر» ⇒ بدونِ سقف و بدونِ دکمهٔ «📎 ادامه»
         e.tap("f:%d:%d:all:0:%d" % (scan_id, cid, gid))
-        assert len(e.api.forwards) == 2                      # سقفِ max_forward_per_group=2
+        assert len(e.api.forwards) == len(members)           # همهٔ فایل‌های گروه، بی‌سقف
         assert e.api.forwards[0]["from"] == 55 and e.api.forwards[0]["to"] == CHAT
-        assert "فورواردِ گروه" in e.last()
-        if len(members) > 2:
-            cont = e.kb_btn("ادامه")
-            assert cont is not None
-            off = int(cont["callback_data"].split(":")[-1])
-            e.tap(cont["callback_data"])
-            assert len(e.api.forwards) == min(len(members), 4)
-            assert off == 2
+        assert "فورواردِ گروه" in e.last() and "بدونِ سقف" in e.last()
+        assert not [b for row in e.last_kb() for b in row if "ادامه" in b["text"]]   # دکمهٔ ادامه حذف شد
         # لینک‌ها، علامت‌زدن، خلاصه
         e.tap("u:%d:%d:%d" % (scan_id, cid, gid))
         assert e.last_view().count("https://t.me/testchan/") >= len(members)
