@@ -600,7 +600,9 @@ app/report.py            # متن‌ها، نوارِ درصد، دکمه‌ها
 app/bot_app.py           # منطقِ ربات: منوها، ویزاردها، کال‌بک‌ها
 dev/fake_telegram.py     # شبیه‌سازِ آفلاینِ تلگرام برای تست/دمو
 dev/mock_e2e.py          # اجرای نمایشیِ کامل بدونِ توکن
-tests/                   # 190 تست
+dev/railway_deploy.py    # دیپلوی روی Railway (آپلودِ تاربال + پیگیریِ وضعیت)
+dev/gh_push.py           # آینه‌کردنِ کد روی گیت‌هاب (بدونِ git)
+tests/                   # 212 تست
 Dockerfile · railway.json · .env.example
 ```
 
@@ -609,6 +611,22 @@ Dockerfile · railway.json · .env.example
 - `railway.json`: builder=DOCKERFILE، `restartPolicyType=ON_FAILURE`، healthcheck `/health`
 - `DB_PATH=/data/dup.db` + والیومِ داشبوردی روی `/data`
   (⚠️ دستورِ `VOLUME` در داکرفایل روی Railway خطای build می‌دهد: `dockerfile invalid: docker VOLUME … not supported` — والیوم را از داشبورد بسازید)
+
+### 🚀 دیپلوی (از همین ورک‌اسپیس، بدونِ `git` و بدونِ سشنِ مرورگری)
+```bash
+/home/user/.tools/venv/bin/python dev/railway_deploy.py          # آپلود + انتظار تا پایانِ بیلد
+/home/user/.tools/venv/bin/python dev/railway_deploy.py --status  # دیدَنِ وضعیتِ آخرین دیپلوی
+/home/user/.tools/venv/bin/python dev/gh_push.py "پیامِ کامیت"     # آینه‌کردنِ کد روی گیت‌هاب
+```
+- توکنِ Railway فقط در `/home/user/railway.env` می‌مانَد (داخلِ ریپو نیست) و تاربالِ آپلودی هم
+  `*.session` · `.env` · `*.db` · `dev/_*` را حذف می‌کند.
+- کلاینتِ رسمیِ `railway up` با «Project-Access-Token» خطای `Invalid RAILWAY_TOKEN` می‌دهد؛
+  `dev/railway_deploy.py` همان آپلود را مستقیم روی `backboard.railway.com/…/up` انجام می‌دهد
+  (همان کاری که خودِ CLI می‌کند) و بعد وضعیتِ دیپلوی را تا `SUCCESS/FAILED` دنبال می‌کند.
+- ⚠️ سرویسِ Railway به مخزنِ **فورکِ** `Morality3387/dupfinder` وصل است (اپِ گیت‌هابِ Railway
+  فقط به همان دسترسی دارد). اگر از داشبورد گزینهٔ «Deploy from repo/commit» را بزنید، ممکن است
+  نسخهٔ قدیمی بیاید؛ برای انتشارِ کدِ جدید از `dev/railway_deploy.py` استفاده کنید
+  (یا در Railway → Settings → Source، دسترسیِ مخزنِ `baddarksss/dupfinder` را به اپ بدهید).
 
 ---
 
