@@ -1001,6 +1001,20 @@ class BotApp:
                int(st.get("channels") or 0),
                " · ⚙️ %d کلیدِ تنظیمات" % int(st.get("settings") or 0) if st.get("settings") else "")))
 
+    async def gh_startup_push(self) -> bool:
+        """🚀 اگر تا حالا هیچ پشتیبانی روی گیتهاب نرفته، همین استارت یکی می‌فرستد.
+
+        چرا: کاربر تازه این قابلیت را روشن کرده و نمی‌خواهد برای «اولین نسخه» منتظرِ یک اسکنِ
+        کامل بماند؛ با این کار پوشهٔ `backup/` همان لحظه در مخزن ساخته می‌شود.
+        """
+        if self._gh_ready() or not self._gh_auto():
+            return False
+        if str(self.db.kv_get("backup:gh:at", "") or ""):
+            return False                      # قبلاً فرستاده شده
+        if int(self.db.stats().get("hashed") or 0) <= 0:
+            return False                      # چیزی برای پشتیبان‌گرفتن نیست
+        return await self._gh_push(self._backup_chat() or int(self.owner_id or 0), auto=True)
+
     async def restore_from_github_if_empty(self) -> int:
         """🚀 در استارت: اگر دیتابیس خالی است (والیومِ تازه/اکانتِ تازه)، از گیتهاب پر می‌کنیم.
 

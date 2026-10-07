@@ -186,6 +186,8 @@ async def amain() -> int:
     bot_task = asyncio.create_task(bot_app.mark_stale_scans())
     # 🗄 DK-17: اگر دیتابیس خالی است (والیومِ تازه/اکانتِ تازه) از پشتیبانِ گیتهاب پر می‌شویم
     gh_task = asyncio.create_task(bot_app.restore_from_github_if_empty())
+    # 🚀 و اگر تا حالا نسخه‌ای روی گیتهاب نرفته، همین استارت یکی می‌فرستد (ساختِ پوشهٔ backup/)
+    gh_task2 = asyncio.create_task(bot_app.gh_startup_push())
     task = asyncio.create_task(bot_app.run())
     log.info("ربات شروع به کار کرد. Ctrl+C برای خروج.")
     try:
@@ -195,6 +197,7 @@ async def amain() -> int:
     log.info("خروج…")
     bot_task.cancel()
     gh_task.cancel()
+    gh_task2.cancel()
     task.cancel()
     try:
         await task
