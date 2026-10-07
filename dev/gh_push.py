@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -48,18 +49,29 @@ def token() -> str:
     raise SystemExit("GH_TOKEN پیدا نشد")
 
 
-def api(path: str, *, method: str = "GET", payload: dict | None = None, tok: str = "") -> dict:
+def api(path: str, *, method: str = "GET", payload: dict | None = None, tok: str = "",
+        tries: int = 4) -> dict:
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(
         "https://api.github.com" + path, data=data, method=method,
         headers={"Authorization": "Bearer " + tok, "User-Agent": "dupfinder-push",
                  "Accept": "application/vnd.github+json", "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode() or "{}")
-    except urllib.error.HTTPError as e:
-        raise SystemExit("GitHub %s %s → %s: %s" % (method, path, e.code,
-                                                    e.read()[:300].decode(errors="replace")))
+    # گیتهاب گاهی 5xx می‌دهد (قطعیِ موقت)؛ چند تلاش با فاصلهٔ پله‌ای می‌کنیم تا پوشِ سورس معطل نماند.
+    for attempt in range(max(1, int(tries))):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read().decode() or "{}")
+        except urllib.error.HTTPError as e:
+            body = e.read()[:300].decode(errors="replace")
+            if e.code >= 500 and attempt + 1 < tries:
+                time.sleep(2 + 3 * attempt)
+                continue
+            raise SystemExit("GitHub %s %s → %s: %s" % (method, path, e.code, body))
+        except Exception as e:
+            if attempt + 1 < tries:
+                time.sleep(2 + 3 * attempt)
+                continue
+            raise SystemExit("GitHub %s %s → شبکه: %s" % (method, path, e))
 
 
 def blob_sha(data: bytes) -> str:
